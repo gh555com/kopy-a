@@ -1,3 +1,4 @@
+# q3.py
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
@@ -26,6 +27,39 @@ from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QB
                           QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve)
 # --- MODIFIED END ---
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QFontDatabase, QCursor
+# Removed QFontMetrics as it's not used in the final font family printing logic per user's original code
+
+
+# --- NEW: 文件大小计算辅助函数 (用于ThreadPoolExecutor) ---
+def _get_path_size_recursive(path):
+    """
+    辅助函数：计算单个文件或目录的大小（递归）。
+    此函数将在ThreadPoolExecutor中执行。
+    """
+    if not os.path.exists(path):
+        return 0
+
+    if os.path.isfile(path):
+        try:
+            return os.path.getsize(path)
+        except OSError as e:
+            # 记录警告，但不中断计算
+            sys.stderr.write(f"警告: 无法获取文件大小 '{path}' - {e}\n")
+            return 0
+    elif os.path.isdir(path):
+        dir_size = 0
+        for dirpath, _, filenames in os.walk(path):
+            for f in filenames:
+                file_path = os.path.join(dirpath, f)
+                try:
+                    dir_size += os.path.getsize(file_path)
+                except OSError as e:
+                    # 记录警告，但不中断计算
+                    sys.stderr.write(f"警告: 无法获取文件大小 '{file_path}' (在目录 '{dirpath}' 中) - {e}\n")
+                    pass # 忽略无法访问的文件
+        return dir_size
+    return 0
+
 
 class ClipboardMonitor(QApplication):
     """
@@ -44,6 +78,11 @@ class ClipboardMonitor(QApplication):
         self.is_on_cooldown = False  # 标记是否处于冷却状态
         self.calculation_done.connect(self.on_calculation_finished)
         self.setup_clipboard_monitor()
+
+        # --- NEW: 初始化线程池，用于并行文件大小计算 ---
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=os.cpu_count() * 2 if os.cpu_count() else 8 # 至少8个线程，或者CPU核心数的两倍
+        )
 
     def setup_clipboard_monitor(self):
         """设置剪贴板监控机制。"""
@@ -108,26 +147,30 @@ class ClipboardMonitor(QApplication):
 
         return None
 
+    # --- NEW: 文件大小异步计算，使用内部线程池 ---
     def calculate_total_size_async(self, file_paths, popup, template):
-        """在后台线程中异步计算总大小。"""
-        executor = concurrent.futures.ThreadPoolExecutor()
-        future = executor.submit(self.calculate_total_size, file_paths)
-        future.add_done_callback(lambda f: self.calculation_done.emit(template.format(self.format_size(f.result())), popup))
-        executor.shutdown(wait=False)
+        """
+        在后台线程中异步计算所有给定文件和文件夹的总大小，利用线程池并行处理。
+        """
+        # 提交所有路径的计算任务到类的线程池
+        futures = [self.executor.submit(_get_path_size_recursive, path) for path in file_paths]
 
-    def calculate_total_size(self, file_paths):
-        """工作函数，递归计算文件和文件夹的总大小。"""
-        total_size = 0
-        for path in file_paths:
-            if os.path.isfile(path):
-                try: total_size += os.path.getsize(path)
-                except OSError: pass
-            elif os.path.isdir(path):
-                for dirpath, _, filenames in os.walk(path):
-                    for f in filenames:
-                        try: total_size += os.path.getsize(os.path.join(dirpath, f))
-                        except OSError: pass
-        return total_size
+        # 使用另一个future来等待所有文件大小计算完成，并汇总结果
+        def aggregate_and_emit_result_on_main_thread(futures_list):
+            total_size = 0
+            for future in futures_list:
+                try:
+                    total_size += future.result()
+                except Exception as exc:
+                    sys.stderr.write(f"警告: 聚合大小计算时发生错误: {exc}\n")
+            # 通过信号将最终结果发送回主UI线程
+            self.calculation_done.emit(template.format(self.format_size(total_size)), popup)
+
+        # 在线程池中提交一个聚合任务，它会等待所有子任务完成，然后在主线程触发信号
+        self.executor.submit(aggregate_and_emit_result_on_main_thread, futures)
+
+    # --- DELETED: 原始的同步计算函数 calculate_total_size 已被移除 ---
+    # 因为它的功能已合并到 _get_path_size_recursive 和新的异步逻辑中
 
     def on_calculation_finished(self, final_text, popup):
         """当大小计算完成时，在主线程中更新弹窗的底部标签。"""
@@ -179,6 +222,15 @@ class ClipboardMonitor(QApplication):
         if popup in self.active_popups:
             self.active_popups.remove(popup)
         popup.close()
+
+    # --- NEW: 确保在应用程序退出时关闭线程池 ---
+    def __del__(self):
+        """
+        确保在应用程序退出时关闭线程池，避免资源泄露。
+        """
+        if hasattr(self, 'executor') and self.executor:
+            self.executor.shutdown(wait=True)
+
 
 class TransparentPopup(QWidget):
     """
