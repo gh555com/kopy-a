@@ -3,12 +3,9 @@
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.1.1 版本特性 (基于 v4.1.0 的功能增强):
-- 【新增】智能识别复制内容：
-  - 单个文件夹: 显示 "文件夹："
-  - 多个文件夹: 显示 "X 个文件夹"
-  - 多个文件: 显示 "X 个文件"
-  - 文件和文件夹混合: 显示 "X 个项目"
+v4.2.0 版本特性 (基于 v4.1.1 的功能增强):
+- 【新增】弹窗时，会从同目录的 "assets" 文件夹中随机播放一个 mp3 音效 (1.mp3 ~ 8.mp3)。
+- (保留v4.1.1) 智能识别复制内容 (单个/多个文件、单个/多个文件夹、混合项目)。
 - (保留v4.1.0) 增加了一种新的滑出动画模式（模式2，默认）：弹窗向左滑行一小段距离，同时淡出（透明度降为0）。
 - (保留v4.1.0) 在代码启动部分增加了“滑出模式开关”，可选择传统的向下滑出（模式1）或新的左滑淡出（模式2）。
 - (保留v4.0.2) 点击弹窗任意位置，可使其立即开始滑出并关闭。
@@ -21,13 +18,17 @@ import sys
 import os
 import signal
 import concurrent.futures
+# --- NEW: 导入随机、路径查找模块 ---
+import random
+import glob
+# --- NEW END ---
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
-# --- MODIFIED START: 导入动画组、缓动曲线等相关模块 ---
+# --- MODIFIED START: 导入动画组、缓动曲线、媒体播放器等相关模块 ---
 from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
-                          QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve)
+                          QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl)
+from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 # --- MODIFIED END ---
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QFontDatabase, QCursor
-# Removed QFontMetrics as it's not used in the final font family printing logic per user's original code
 
 
 # --- NEW: 文件大小计算辅助函数 (用于ThreadPoolExecutor) ---
@@ -83,6 +84,38 @@ class ClipboardMonitor(QApplication):
         self.executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=os.cpu_count() * 2 if os.cpu_count() else 8 # 至少8个线程，或者CPU核心数的两倍
         )
+
+        # --- NEW: 初始化音频播放器并加载音效文件 ---
+        self.player = QMediaPlayer()
+        self.setup_sound_files()
+
+    def setup_sound_files(self):
+        """查找并加载音效文件列表。"""
+        try:
+            # 获取脚本所在的目录
+            script_dir = os.path.dirname(os.path.realpath(__file__))
+            # 构建 assets 文件夹的绝对路径
+            assets_dir = os.path.join(script_dir, 'assets')
+            # 查找所有 1.mp3 到 8.mp3 文件
+            self.sound_files = glob.glob(os.path.join(assets_dir, '[1-8].mp3'))
+
+            if not self.sound_files:
+                print("警告: 在 'assets' 文件夹中未找到任何 mp3 音效文件。")
+            else:
+                print(f"成功加载 {len(self.sound_files)} 个音效文件。")
+        except Exception as e:
+            print(f"加载音效文件时出错: {e}")
+            self.sound_files = []
+
+    def play_random_sound(self):
+        """从列表中随机选择并播放一个音效。"""
+        # 如果音效列表不为空，且当前没有正在播放的音乐
+        if self.sound_files and self.player.state() != QMediaPlayer.PlayingState:
+            sound_path = random.choice(self.sound_files)
+            # 使用 QUrl.fromLocalFile 来确保路径在各平台兼容
+            url = QUrl.fromLocalFile(sound_path)
+            self.player.setMedia(QMediaContent(url))
+            self.player.play()
 
     def setup_clipboard_monitor(self):
         """设置剪贴板监控机制。"""
@@ -142,20 +175,16 @@ class ClipboardMonitor(QApplication):
             if not text: return None
             try: byte_size = len(text.encode('gbk'))
             except UnicodeEncodeError: byte_size = len(text.encode('utf-8', 'replace'))
-            # return {"type": "text", "top_text": text, "bottom_text": f"&nbsp;&nbsp;&nbsp;{self.format_size(byte_size)}"}
             return {"type": "text", "top_text": text, "bottom_text": f"{self.format_size(byte_size)}"}
 
         return None
 
-    # --- NEW: 文件大小异步计算，使用内部线程池 ---
     def calculate_total_size_async(self, file_paths, popup, template):
         """
         在后台线程中异步计算所有给定文件和文件夹的总大小，利用线程池并行处理。
         """
-        # 提交所有路径的计算任务到类的线程池
         futures = [self.executor.submit(_get_path_size_recursive, path) for path in file_paths]
 
-        # 使用另一个future来等待所有文件大小计算完成，并汇总结果
         def aggregate_and_emit_result_on_main_thread(futures_list):
             total_size = 0
             for future in futures_list:
@@ -163,14 +192,9 @@ class ClipboardMonitor(QApplication):
                     total_size += future.result()
                 except Exception as exc:
                     sys.stderr.write(f"警告: 聚合大小计算时发生错误: {exc}\n")
-            # 通过信号将最终结果发送回主UI线程
             self.calculation_done.emit(template.format(self.format_size(total_size)), popup)
 
-        # 在线程池中提交一个聚合任务，它会等待所有子任务完成，然后在主线程触发信号
         self.executor.submit(aggregate_and_emit_result_on_main_thread, futures)
-
-    # --- DELETED: 原始的同步计算函数 calculate_total_size 已被移除 ---
-    # 因为它的功能已合并到 _get_path_size_recursive 和新的异步逻辑中
 
     def on_calculation_finished(self, final_text, popup):
         """当大小计算完成时，在主线程中更新弹窗的底部标签。"""
@@ -187,12 +211,14 @@ class ClipboardMonitor(QApplication):
 
     def on_clipboard_changed(self):
         """剪贴板变化的主要事件处理程序。"""
-        # 检查是否处于冷却状态，如果是则不处理剪贴板变化
         if self.is_on_cooldown:
             return
 
         data = self.process_clipboard_data()
         if data:
+            # --- NEW: 在显示弹窗前播放音效 ---
+            self.play_random_sound()
+
             new_popup = self.show_popup(data)
             if data.get("type") == "file":
                 new_popup.update_bottom_text(data["bottom_template"].format("●"))
@@ -203,15 +229,11 @@ class ClipboardMonitor(QApplication):
         for popup in self.active_popups[:]:
             popup.slide_out()
 
-        # --- MODIFIED START: 将滑出模式和颜色模式传递给弹窗实例 ---
         new_popup = TransparentPopup(data, self, self.slide_out_mode, self.current_color_mode)
-        # 切换颜色模式，为下一个弹窗做准备
         self.current_color_mode = 1 - self.current_color_mode
-        # --- MODIFIED END ---
         new_popup.raise_()
         self.active_popups.append(new_popup)
 
-        # 启动冷却时间：设置冷却状态为True，并在冷却时间后自动恢复
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
 
@@ -223,7 +245,6 @@ class ClipboardMonitor(QApplication):
             self.active_popups.remove(popup)
         popup.close()
 
-    # --- NEW: 确保在应用程序退出时关闭线程池 ---
     def __del__(self):
         """
         确保在应用程序退出时关闭线程池，避免资源泄露。
@@ -240,23 +261,20 @@ class TransparentPopup(QWidget):
     SLIDE_OUT_DURATION = 111
     LIFECYCLE_SECONDS = 19
 
-    # --- MODIFIED START: 接收并保存滑出模式和颜色模式 ---
     def __init__(self, data, monitor, slide_out_mode=2, color_mode=0):
         super().__init__()
         self.monitor = monitor
         self.slide_out_mode = slide_out_mode
         self.color_mode = color_mode  # 0: 黑底白字, 1: 白底黑字
 
-        # 根据颜色模式设置背景色和文字颜色
         if self.color_mode == 0:
-            self.background_color = QColor(0, 0, 0, 240)  # 黑色背景
-            self.text_color = Qt.white  # 白色文字
-            self.border_color = Qt.white  # 白色边框
+            self.background_color = QColor(0, 0, 0, 240)
+            self.text_color = Qt.white
+            self.border_color = Qt.white
         else:
-            self.background_color = QColor(238, 232, 213, 250)  # 米色背景
-            self.text_color = QColor(55, 45, 15)  # 黑咖啡色文字
-            self.border_color = QColor(55, 45, 15)  # 黑咖啡色边框
-    # --- MODIFIED END ---
+            self.background_color = QColor(238, 232, 213, 250)
+            self.text_color = QColor(55, 45, 15)
+            self.border_color = QColor(55, 45, 15)
 
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
@@ -268,32 +286,27 @@ class TransparentPopup(QWidget):
         font = QFont()
         font.setFamilies(font_fallback_list)
         font.setPointSize(11)
-        # font.setBold(True)
 
         self.top_content_label = QLabel(data.get("top_text")); self.top_content_label.setFont(font)
-        # 明确设置为普通文本格式以保证性能
         self.top_content_label.setTextFormat(Qt.PlainText)
-        # 根据颜色模式设置顶部内容区文字颜色，只有白色背景模式下文字加粗
         if self.color_mode == 0:
-            self.top_content_label.setStyleSheet("color: #ffffff;")  # 黑色背景模式不加粗
+            self.top_content_label.setStyleSheet("color: #ffffff;")
         else:
-            self.top_content_label.setStyleSheet(f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()}); font-weight: bold;")  # 白色背景模式加粗
+            self.top_content_label.setStyleSheet(f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()}); font-weight: bold;")
         self.top_content_label.setWordWrap(True)
         self.top_content_label.setAlignment(Qt.AlignTop | Qt.AlignLeft); self.top_content_label.setMaximumHeight(162)
 
         self.bottom_message_label = QLabel(data.get("bottom_text", "")); self.bottom_message_label.setFont(font)
-        # 底部信息区文字颜色设置：黑色背景保持暗金色，白色背景使用更红黑的颜色
         if self.color_mode == 0:
-            self.bottom_message_label.setStyleSheet("color: #cd853f;")  # 黑色背景模式不加粗
+            self.bottom_message_label.setStyleSheet("color: #cd853f;")
         else:
-            self.bottom_message_label.setStyleSheet("color: #8B4513; font-weight: bold;")  # 白色背景模式使用红棕色，更红、更黑
+            self.bottom_message_label.setStyleSheet("color: #8B4513; font-weight: bold;")
         self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
-        self.bottom_message_label.setTextFormat(Qt.RichText)  # 启用富文本格式以支持斜体显示
+        self.bottom_message_label.setTextFormat(Qt.RichText)
 
         layout.addWidget(self.top_content_label); layout.addStretch(); layout.addWidget(self.bottom_message_label)
 
         self.target_screen_geom = self.get_current_screen_geometry()
-
         self.move_to_initial_position()
         self.show()
         self.slide_in()
@@ -315,14 +328,12 @@ class TransparentPopup(QWidget):
         self.lifecycle_timer = QTimer(self); self.lifecycle_timer.setSingleShot(True)
         self.lifecycle_timer.timeout.connect(self.slide_out); self.lifecycle_timer.start(self.LIFECYCLE_SECONDS * 1000)
 
-    # --- MODIFIED START: 重写 slide_out 方法以支持两种模式 ---
     def slide_out(self):
         """根据设定的模式执行不同的滑出动画。"""
         if hasattr(self, 'lifecycle_timer'): self.lifecycle_timer.stop()
         if hasattr(self, 'is_sliding_out') and self.is_sliding_out: return
         self.is_sliding_out = True
 
-        # 模式 1: 向下滑出 (原有模式)
         if self.slide_out_mode == 1:
             self.slide_anim = QPropertyAnimation(self, b"pos")
             self.slide_anim.setDuration(self.SLIDE_OUT_DURATION)
@@ -330,32 +341,22 @@ class TransparentPopup(QWidget):
             self.slide_anim.setEndValue(QPoint(self.x(), self.target_screen_geom.bottom()))
             self.slide_anim.finished.connect(lambda: self.monitor.close_popup(self))
             self.slide_anim.start(QPropertyAnimation.DeleteWhenStopped)
-
-        # 模式 2: 向左滑行并淡出 (新模式)
         else:
             self.anim_group = QParallelAnimationGroup(self)
-
-            # 动画1: 透明度变化 (从1到0)
             opacity_anim = QPropertyAnimation(self, b"windowOpacity")
             opacity_anim.setDuration(self.SLIDE_OUT_DURATION)
             opacity_anim.setStartValue(1.0)
             opacity_anim.setEndValue(0.0)
             opacity_anim.setEasingCurve(QEasingCurve.InQuad)
-
-            # 动画2: 位置变化 (向左移动80像素)
             pos_anim = QPropertyAnimation(self, b"pos")
             pos_anim.setDuration(self.SLIDE_OUT_DURATION)
             pos_anim.setStartValue(self.pos())
             pos_anim.setEndValue(QPoint(self.x() - 80, self.y()))
             pos_anim.setEasingCurve(QEasingCurve.OutQuad)
-
             self.anim_group.addAnimation(opacity_anim)
             self.anim_group.addAnimation(pos_anim)
-
-            # 动画组完成后再关闭窗口
             self.anim_group.finished.connect(lambda: self.monitor.close_popup(self))
             self.anim_group.start(QAbstractAnimation.DeleteWhenStopped)
-    # --- MODIFIED END ---
 
     def move_to_initial_position(self):
         """将窗口移动到当前屏幕的右侧外部。"""
@@ -364,7 +365,6 @@ class TransparentPopup(QWidget):
     def slide_in(self):
         """动画化弹窗从当前屏幕的右侧滑入。"""
         end_pos = QPoint(self.target_screen_geom.right() - self.width() - 40, self.y())
-
         self.slide_anim = QPropertyAnimation(self, b"pos"); self.slide_anim.setDuration(self.SLIDE_IN_DURATION)
         self.slide_anim.setStartValue(self.pos()); self.slide_anim.setEndValue(end_pos)
         self.slide_anim.start(QPropertyAnimation.DeleteWhenStopped)
@@ -374,7 +374,7 @@ class TransparentPopup(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), self.background_color) # 使用根据颜色模式设置的背景色
+        painter.fillRect(self.rect(), self.background_color)
         pen = QPen(self.border_color, 1, Qt.DashLine); painter.setPen(pen)
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
 
@@ -387,22 +387,17 @@ if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
 
-    # --- MODIFIED START: 将滑出模式传入主程序 ---
     app = ClipboardMonitor(sys.argv, slide_out_mode=SLIDE_OUT_MODE)
-    # --- MODIFIED END ---
 
     print("="*20 + " 系统可用字体家族名列表 " + "="*20)
     print(" (这些是您可以复制并粘贴到代码中的名字) ")
-
     db = QFontDatabase()
     verified_families = set()
     for name in db.families():
         font = QFont(name)
         verified_families.add(font.family())
-
     print(sorted(list(verified_families)))
     print("="*63)
-
 
     signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
     timer = QTimer(); timer.start(50); timer.timeout.connect(lambda: None)
