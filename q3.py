@@ -1,65 +1,65 @@
-# q3.py
+# q3.py (v4.2.2 - Audio Overlap Enhanced)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.2.0 版本特性 (基于 v4.1.1 的功能增强):
-- 【新增】弹窗时，会从同目录的 "assets" 文件夹中随机播放一个 mp3 音效 (1.mp3 ~ 8.mp3)。
+v4.2.2 版本特性 (基于 v4.2.1 的音频优化):
+- 【优化】重构了音效播放逻辑。
+- 【优化】允许音效重叠播放：每次触发弹窗都会创建一个新的播放器实例，解决了快速复制时音效无法播放的问题。
+- 【优化】避免连续重复：确保连续两次播放的音效不是同一个文件。
+- (保留v4.2.1) 使用 os.scandir() 优化了文件/文件夹大小的计算逻辑，大幅提升性能。
+- (保留v4.2.0) 弹窗时，会从同目录的 "assets" 文件夹中随机播放一个 mp3 音效 (1.mp3 ~ 8.mp3)。
 - (保留v4.1.1) 智能识别复制内容 (单个/多个文件、单个/多个文件夹、混合项目)。
-- (保留v4.1.0) 增加了一种新的滑出动画模式（模式2，默认）：弹窗向左滑行一小段距离，同时淡出（透明度降为0）。
-- (保留v4.1.0) 在代码启动部分增加了“滑出模式开关”，可选择传统的向下滑出（模式1）或新的左滑淡出（模式2）。
+- (保留v4.1.0) 增加了一种新的滑出动画模式（模式2，默认）。
 - (保留v4.0.2) 点击弹窗任意位置，可使其立即开始滑出并关闭。
-- (保留v4.0.2) 优化了复制文本和文件时的底部标签格式。
-- (保留v4.0.1) 启动时打印的字体列表，是真正可供代码使用的“字体家族名”。
-- (保留v4.0) 弹窗会出现在鼠标指针所在的屏幕的右下角，完美支持多显示器环境。
-- (保留v4.0) 采用字体回退链机制，优先使用高质量字体，若缺失则自动使用备用字体。
 """
 import sys
 import os
 import signal
 import concurrent.futures
-# --- NEW: 导入随机、路径查找模块 ---
 import random
 import glob
-# --- NEW END ---
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
-# --- MODIFIED START: 导入动画组、缓动曲线、媒体播放器等相关模块 ---
 from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
                           QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl)
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-# --- MODIFIED END ---
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QFontDatabase, QCursor
 
 
-# --- NEW: 文件大小计算辅助函数 (用于ThreadPoolExecutor) ---
-def _get_path_size_recursive(path):
+# --- 文件大小计算函数 (v4.2.1, 无改动) ---
+def _get_path_size(path):
     """
-    辅助函数：计算单个文件或目录的大小（递归）。
-    此函数将在ThreadPoolExecutor中执行。
+    优化版本：计算单个文件或目录的大小
+    - 使用os.scandir()代替os.walk()，性能更好
+    - 减少系统调用次数，提高效率
     """
-    if not os.path.exists(path):
-        return 0
-
-    if os.path.isfile(path):
-        try:
+    try:
+        if os.path.isfile(path):
             return os.path.getsize(path)
-        except OSError as e:
-            # 记录警告，但不中断计算
-            sys.stderr.write(f"警告: 无法获取文件大小 '{path}' - {e}\n")
+        elif os.path.isdir(path):
+            total_size = 0
+            try:
+                with os.scandir(path) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_file(follow_symlinks=False):
+                                total_size += entry.stat(follow_symlinks=False).st_size
+                            elif entry.is_dir(follow_symlinks=False):
+                                # 递归计算子目录大小
+                                total_size += _get_path_size(entry.path)
+                        except (OSError, PermissionError):
+                            # 忽略无法访问的子项
+                            continue
+            except (OSError, PermissionError):
+                # 忽略无法访问的目录
+                pass
+            return total_size
+        else:
             return 0
-    elif os.path.isdir(path):
-        dir_size = 0
-        for dirpath, _, filenames in os.walk(path):
-            for f in filenames:
-                file_path = os.path.join(dirpath, f)
-                try:
-                    dir_size += os.path.getsize(file_path)
-                except OSError as e:
-                    # 记录警告，但不中断计算
-                    sys.stderr.write(f"警告: 无法获取文件大小 '{file_path}' (在目录 '{dirpath}' 中) - {e}\n")
-                    pass # 忽略无法访问的文件
-        return dir_size
-    return 0
+    except (OSError, PermissionError):
+        # 忽略无法访问的顶层路径
+        return 0
+# --- 文件大小计算函数结束 ---
 
 
 class ClipboardMonitor(QApplication):
@@ -67,36 +67,36 @@ class ClipboardMonitor(QApplication):
     主应用程序类，处理剪贴板监控并管理弹窗。
     """
     calculation_done = pyqtSignal(str, QWidget)
-    # 类变量，用于追踪当前颜色模式（0: 黑底白字, 1: 白底黑字）
     current_color_mode = 0
-    # 冷却时间（毫秒）
     COOLDOWN_TIME_MS = 100
 
     def __init__(self, argv, slide_out_mode=2):
         super().__init__(argv)
-        self.slide_out_mode = slide_out_mode  # 将滑出模式储存在实例中
+        self.slide_out_mode = slide_out_mode
         self.active_popups = []
-        self.is_on_cooldown = False  # 标记是否处于冷却状态
+        self.is_on_cooldown = False
         self.calculation_done.connect(self.on_calculation_finished)
         self.setup_clipboard_monitor()
 
-        # --- NEW: 初始化线程池，用于并行文件大小计算 ---
         self.executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=os.cpu_count() * 2 if os.cpu_count() else 8 # 至少8个线程，或者CPU核心数的两倍
+            max_workers=os.cpu_count() * 2 if os.cpu_count() else 8
         )
 
-        # --- NEW: 初始化音频播放器并加载音效文件 ---
-        self.player = QMediaPlayer()
+        # --- MODIFIED START: 音频播放器管理 ---
+        # 移除单个播放器 self.player
+        # self.player = QMediaPlayer()
+        # 替换为：
+        self.active_players = []  # 用于存储所有正在播放的播放器实例
+        self.last_played_sound = None # 用于记录上一个播放的音效路径
+        # --- MODIFIED END ---
+
         self.setup_sound_files()
 
     def setup_sound_files(self):
         """查找并加载音效文件列表。"""
         try:
-            # 获取脚本所在的目录
             script_dir = os.path.dirname(os.path.realpath(__file__))
-            # 构建 assets 文件夹的绝对路径
             assets_dir = os.path.join(script_dir, 'assets')
-            # 查找所有 1.mp3 到 8.mp3 文件
             self.sound_files = glob.glob(os.path.join(assets_dir, '[1-8].mp3'))
 
             if not self.sound_files:
@@ -107,15 +107,53 @@ class ClipboardMonitor(QApplication):
             print(f"加载音效文件时出错: {e}")
             self.sound_files = []
 
+    # --- MODIFIED START: 重写音效播放和新增清理函数 ---
     def play_random_sound(self):
-        """从列表中随机选择并播放一个音效。"""
-        # 如果音效列表不为空，且当前没有正在播放的音乐
-        if self.sound_files and self.player.state() != QMediaPlayer.PlayingState:
-            sound_path = random.choice(self.sound_files)
-            # 使用 QUrl.fromLocalFile 来确保路径在各平台兼容
-            url = QUrl.fromLocalFile(sound_path)
-            self.player.setMedia(QMediaContent(url))
-            self.player.play()
+        """
+        从列表中随机选择并播放一个音效。
+        - 允许重叠播放（通过创建新 QMediaPlayer 实例）。
+        - 确保连续两次播放的音效不一样。
+        """
+        if not self.sound_files:
+            return
+
+        # 1. 确保连续两次播放的音效不一样
+        candidate_files = self.sound_files
+        if self.last_played_sound and len(self.sound_files) > 1:
+            # 创建一个不包含上次播放音效的候选列表
+            candidate_files = [f for f in self.sound_files if f != self.last_played_sound]
+            if not candidate_files: # 容错，万一列表有问题
+                candidate_files = self.sound_files
+
+        sound_path = random.choice(candidate_files)
+        self.last_played_sound = sound_path # 记录本次播放
+
+        # 2. 创建新实例以允许重叠播放
+        player = QMediaPlayer()
+        url = QUrl.fromLocalFile(sound_path)
+
+        # 3. 必须存储对 player 的引用，否则它会被立即回收
+        self.active_players.append(player)
+
+        # 4. 连接信号，在播放结束时自动清理
+        player.mediaStatusChanged.connect(self.on_player_status_changed)
+
+        player.setMedia(QMediaContent(url))
+        player.play()
+
+    def on_player_status_changed(self, status):
+        """
+        播放器状态改变时的槽函数。
+        当音效播放结束 (EndOfMedia) 时，将播放器从活动列表中移除并断开连接，
+        以便 Python 的垃圾回收器可以回收它。
+        """
+        if status == QMediaPlayer.EndOfMedia:
+            player = self.sender()
+            if player in self.active_players:
+                self.active_players.remove(player)
+            if player:
+                player.disconnect()
+    # --- MODIFIED END ---
 
     def setup_clipboard_monitor(self):
         """设置剪贴板监控机制。"""
@@ -130,7 +168,6 @@ class ClipboardMonitor(QApplication):
         clipboard = self.clipboard()
         mime_data = clipboard.mimeData()
 
-        # --- MODIFIED START: 增强对文件/文件夹类型的判断 ---
         if mime_data.hasUrls():
             urls = mime_data.urls()
             if not urls: return None
@@ -149,19 +186,18 @@ class ClipboardMonitor(QApplication):
                 top_text = os.path.basename(local_paths[0])
                 if num_folders == 1:
                     bottom_template = "文件夹: {}"
-                else:  # 默认为文件
+                else:
                     bottom_template = "文件: {}"
-            else:  # count > 1
+            else:
                 top_text = "\n".join([os.path.basename(p) for p in local_paths])
                 if num_files > 0 and num_folders > 0:
                     bottom_template = f"{count} 个项目: {{}}"
-                elif num_folders > 0:  # 仅文件夹
+                elif num_folders > 0:
                     bottom_template = f"{count} 个文件夹: {{}}"
-                else:  # 仅文件
+                else:
                     bottom_template = f"{count} 个文件: {{}}"
 
             return {"type": "file", "top_text": top_text, "bottom_template": bottom_template, "paths": local_paths}
-        # --- MODIFIED END ---
 
         if mime_data.hasImage():
             pixmap = clipboard.pixmap()
@@ -183,7 +219,7 @@ class ClipboardMonitor(QApplication):
         """
         在后台线程中异步计算所有给定文件和文件夹的总大小，利用线程池并行处理。
         """
-        futures = [self.executor.submit(_get_path_size_recursive, path) for path in file_paths]
+        futures = [self.executor.submit(_get_path_size, path) for path in file_paths]
 
         def aggregate_and_emit_result_on_main_thread(futures_list):
             total_size = 0
@@ -216,8 +252,7 @@ class ClipboardMonitor(QApplication):
 
         data = self.process_clipboard_data()
         if data:
-            # --- NEW: 在显示弹窗前播放音效 ---
-            self.play_random_sound()
+            self.play_random_sound() # 触发音效
 
             new_popup = self.show_popup(data)
             if data.get("type") == "file":
@@ -265,7 +300,7 @@ class TransparentPopup(QWidget):
         super().__init__()
         self.monitor = monitor
         self.slide_out_mode = slide_out_mode
-        self.color_mode = color_mode  # 0: 黑底白字, 1: 白底黑字
+        self.color_mode = color_mode
 
         if self.color_mode == 0:
             self.background_color = QColor(0, 0, 0, 240)
