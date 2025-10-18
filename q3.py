@@ -1,23 +1,26 @@
-# q3.py (v4.5.16 - AttributeError Hotfix)
+# q3.py (v4.5.17 - Re-enable Internal D&D)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.16 版本特性 (基于 v4.5.15):
-- 【Bug 修复】修复 v4.5.15 中引入的 AttributeError。
-  - 错误: 'StickyTextEdit' object has no attribute 'setDragEnabled'.
-  - 原因: 错误地调用了 setDragEnabled (这是 QAbstractItemView 的方法)。
-  - 解决方案: 对 QTextEdit 应使用 self.setAcceptDrops(False)
-    来禁用拖放功能，这同样能修复光标变化问题。
+v4.5.17 版本特性 (基于 v4.5.16):
+- 【功能恢复】恢复固定模式下，在 QTextEdit 内部拖动文字进行移动的功能。
+  - v4.5.16 的 setAcceptDrops(False) 修复了光标问题，但也禁用了 D&D。
+  - 解决方案:
+    1. 恢复 self.setAcceptDrops(True)
+    2. 设置 self.setDragDropMode(QAbstractScrollArea.InternalMove)
+- 【澄清】
+  - 这是一个权衡：
+    - v4.5.16: 光标永不变化 (始终是I-beam)，但无法拖动文字。
+    - v4.5.17: 可以拖动文字，但拖动时系统会显示“移动”光标。
+  - v4.5.15 中对“画布平移”的修复 (setRange(0,0)) 仍然有效。
+
+v4.5.16 版本特性:
+- 【Bug 修复】修复 v4.5.15 中引入的 AttributeError (setDragEnabled -> setAcceptDrops)。
 
 v4.5.15 版本特性:
-- 【Bug 修复】修复固定模式下拖选文本导致画布平移的问题:
-  - 在 v4.5.14 启用 Qt.TextEditorInteraction 后，QTextEdit 默认的
-    “边缘滚动”行为被激活，导致了平移 Bug 回归。
-  - 解决方案: 在 activate_sticky_mode 中，强制将水平滚动条的范围
-    设置为 (0, 0)，即 self.top_content.horizontalScrollBar().setRange(0, 0)。
-- 【UX 修复】拖选文本时光标变回系统默认样式的问题:
-  - 解决方案: 在 StickyTextEdit 的 __init__ 方法中禁用拖放功能。
+- 【Bug 修复】修复固定模式下拖选文本导致画布平移的问题。
+- 【UX 修复】(通过 v4.5.16 的 setAcceptDrops(False) 解决)
 """
 import sys
 import os
@@ -25,7 +28,8 @@ import signal
 import concurrent.futures
 import random
 import glob
-from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout, QTextEdit, QScrollBar
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
+                             QTextEdit, QScrollBar, QAbstractScrollArea) # 导入 QAbstractScrollArea
 from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
                           QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl,
                           QEvent, QTime, QRect)
@@ -51,7 +55,7 @@ def _get_path_size(path):
                                 total_size += _get_path_size(entry.path)
                         except (OSEError, PermissionError):
                             continue
-            except (OSError, PermissionError):
+            except (OSEError, PermissionError):
                 pass
             return total_size
         else:
@@ -61,15 +65,15 @@ def _get_path_size(path):
 # --- 文件大小计算函数结束 ---
 
 
-# --- MODIFIED: v4.5.16 - 修复 AttributeError ---
+# --- MODIFIED: v4.5.17 - 恢复 D&D ---
 class StickyTextEdit(QTextEdit):
     """
+    v4.5.17:
+    - 恢复内部拖放(Drag and Drop)功能。
+    - self.setAcceptDrops(True)
+    - self.setDragDropMode(QAbstractScrollArea.InternalMove)
     v4.5.16:
     - 修复: 使用 setAcceptDrops(False) 替代 setDragEnabled(False)。
-    v4.5.15:
-    - 禁用拖放 (Drag and Drop) 来修复光标变化问题。
-    v4.5.14:
-    - 增加 insertFromMimeData 覆盖，强制只粘贴纯文本。
     """
     internal_copy_triggered = pyqtSignal()
 
@@ -77,9 +81,11 @@ class StickyTextEdit(QTextEdit):
         super().__init__(parent)
         self.popup = None
 
-        # v4.5.16: 修复 AttributeError
-        # 禁用拖放功能，防止拖拽时改变光标
-        self.setAcceptDrops(False)
+        # v4.5.17: 恢复 D&D 功能
+        # 允许接收拖放
+        self.setAcceptDrops(True)
+        # 仅允许内部移动 (这会覆盖 v4.5.16 的修复，导致光标在拖动时变化)
+        self.setDragDropMode(QAbstractScrollArea.InternalMove)
 
         self.is_dragging = False
 
@@ -115,12 +121,16 @@ class StickyTextEdit(QTextEdit):
 
     def mouseMoveEvent(self, event):
         """
-        v4.5.11: 核心修复 - 事件门控
-        v4.5.15: 此逻辑仍然需要，用于阻止鼠标拖出控件区域时，窗口本身移动
+        v4.5.11/v4.5.15:
+        此逻辑仍然需要，用于阻止鼠标拖出控件区域时，窗口本身移动，
+        或阻止画布平移。
         """
         if self.popup and self.popup.is_sticky and self.is_dragging:
             is_inside_x_bounds = (0 <= event.pos().x() < self.rect().width())
             if is_inside_x_bounds:
+                # 当 D&D 启用时, super() 调用将负责
+                # 1. 扩展文本选择
+                # 2. 启动 D&D (如果鼠标在选区上)
                 super().mouseMoveEvent(event)
             else:
                 return
@@ -464,6 +474,7 @@ class TransparentPopup(QWidget):
         self.top_content.setTextInteractionFlags(Qt.TextEditorInteraction)
 
         # v4.5.15: 锁定水平滚动条，彻底阻止画布平移
+        # 这个修复在 v4.5.17 中仍然至关重要！
         self.top_content.horizontalScrollBar().setRange(0, 0)
 
         self.top_content.setMaximumHeight(10000)
@@ -540,21 +551,6 @@ if __name__ == "__main__":
     print("="*20 + " 系统可用字体家族名列表 " + "="*20)
     db = QFontDatabase(); print(sorted(list(set(QFont(name).family() for name in db.families()))))
     print("="*63)
-    一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
-    v4.5.16 版本特性 (基于 v4.5.15):
-    - 【Bug 修复】修复 v4.5.15 中引入的
     signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
     timer = QTimer(); timer.start(50); timer.timeout.connect(lambda: None)
     sys.exit(app.exec_())
-
-
-
-
-调用了 setDragEna QTextEdit 应使用 self.setAcceptDrops(False)
-    来禁用拖放功能，这同样能修复光标变化问
-
-
-bled (这是 QAbstractItemView 的方法)。
-  - 解决方案: 对
-
-
