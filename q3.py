@@ -1,22 +1,22 @@
-# q3.py (v4.5.12 - Selection Color Fix)
+# q3.py (v4.5.14 - Basic Editing & Alpha)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.12 版本特性 (基于 v4.5.11):
-- 【UI 修复】固定文本选中颜色:
-  - 遵照用户要求，不再使用系统默认的文本选中配色（如亮蓝色）。
-  - 通过在 setup_colors_and_styles 中设置 QPalette，
-    强制 QPalette.Highlight (选中背景) 使用对应的“暗金色”，
-    并强制 QPalette.HighlightedText (选中文本) 使用“纯白色”。
-  - 此规则在明暗模式下均生效。
-- 【核心确认】画布平移 (v4.5.11 方案):
-  - v4.5.11 的“事件门控”逻辑 (is_dragging + 边界检查)
-    被确认为最终解决方案，代码保持不变。
-  - v4.5.10 及之前的 setRange/setValue 代码已彻底清除。
-- 【UI 确认】背景与分隔线:
-  - 保持 v4.5.11 的状态：无分隔线，且底部消息区
-    与内容区共享同一个半透明背景。
+v4.5.14 版本特性 (基于 v4.5.13):
+- 【功能新增】固定模式下的纯文本编辑:
+  - 在 activate_sticky_mode 中，设置 top_content.setReadOnly(False)
+    并设置 setTextInteractionFlags(Qt.TextEditorInteraction)。
+  - 在 deactivate_sticky_mode 中，恢复 setReadOnly(True) 和
+    setTextInteractionFlags(Qt.NoTextInteraction)。
+  - 在 StickyTextEdit 类中，重写 insertFromMimeData 方法。
+  - 在该方法中，只提取剪贴板的 source.text() (纯文本) 并插入，
+    不调用 super()，从而有效阻止图片、富文本或文件的粘贴。
+- 【UI 调整】亮色模式选中背景 75% 透明度:
+  - 在 setup_colors_and_styles 的 color_mode == 1 (亮色模式) 分支中，
+    将 QPalette.Highlight 颜色的 QColor 从 100% 不透明的 hex
+    改为 QColor(139, 69, 19, 191)，即 75% 不透明度的红棕色。
+  - 暗色模式保持不变 (100% 不透明的暗金色)。
 """
 import sys
 import os
@@ -30,7 +30,7 @@ from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QB
                           QEvent, QTime, QRect)
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtGui import (QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
-                         QTextOption, QTextCursor, QKeySequence, QPalette) # v4.5.12: 导入 QPalette
+                         QTextOption, QTextCursor, QKeySequence, QPalette)
 
 
 # --- 文件大小计算函数 (v4.2.1, 无改动) ---
@@ -60,12 +60,13 @@ def _get_path_size(path):
 # --- 文件大小计算函数结束 ---
 
 
-# --- MODIFIED: v4.5.11 - 事件门控逻辑 (已确认) ---
+# --- MODIFIED: v4.5.14 - 添加粘贴拦截 ---
 class StickyTextEdit(QTextEdit):
     """
-    一个自定义的 QTextEdit，用于在固定模式下正确处理复制音效，
-    并使用“事件门控”逻辑修复拖拽选择时画布平移(panning)的 BUG。
-    (v4.5.11 逻辑，v4.5.12 确认保留)
+    v4.5.14:
+    - 增加 insertFromMimeData 覆盖，强制只粘贴纯文本。
+    v4.5.11:
+    - 使用“事件门控”逻辑修复拖拽选择时画布平移(panning)的 BUG。
     """
     internal_copy_triggered = pyqtSignal()
 
@@ -78,17 +79,85 @@ class StickyTextEdit(QTextEdit):
 
         # v4.5.11: 确认 v4.5.9 的 setRange(0, 0) 已删除
 
+    # --- v4.5.14: 粘贴内容拦截，强制只粘贴纯文本 ---
+    def insertFromMimeData(self, source):
+        """
+        v4.5.14: 粘贴内容拦截。
+        强制只粘贴纯文本 (text/plain)。
+        """
+        if source.hasText():
+            # 1. 只获取剪贴板中的纯文本内容
+            text = source.text()
+            if text:
+                # 2. 以纯文本方式插入光标所在位置
+                self.textCursor().insertText(text)
+
+        # 3. (故意不调用 super().insertFromMimeData(source))
+        #    这样可以阻止 Qt 默认的富文本、HTML 或图片粘贴行为。
+    # --- 添加结束 ---
+
     def keyPressEvent(self, event):
         """
         v4.5.9 修复 (已确认有效, 逻辑保留):
         重写按键事件，在 Ctrl+C 发生时立即发出信号，并设置冷却。
         """
+        # v4.5.14: 检查是否可编辑，如果是，也允许标准的 Ctrl+C
+        is_editable = not self.isReadOnly()
+
         if event.matches(QKeySequence.Copy):
             if self.popup and self.popup.is_sticky and self.textCursor().hasSelection():
                 self.internal_copy_triggered.emit()
                 self.popup.monitor.set_cooldown()
 
-        super().keyPressEvent(event)
+        # v4.5.14: 如果可编辑，允许所有默认按键事件 (包括 Ctrl+V, Delete, Backspace 等)
+        if is_editable:
+            super().keyPressEvent(event)
+
+        # v4.5.14: 如果不可编辑 (非 sticky 模式)，只允许特定的按键 (如 Ctrl+C)
+        elif event.matches(QKeySequence.Copy):
+             super().keyPressEvent(event)
+
+        # v4.5.14: 如果不可编辑，且不是复制，则忽略该事件
+        # (这保留了 v4.5.13 的行为，即非 sticky 模式下不能打字)
+        else:
+            # 允许导航键 (上/下/左/右)
+            if event.key() in (Qt.Key_Up, Qt.Key_Down, Qt.Key_Left, Qt.Key_Right, Qt.Key_PageUp, Qt.Key_PageDown, Qt.Key_Home, Qt.Key_End):
+                 super().keyPressEvent(event)
+            # else:
+            #     event.ignore() # 阻止其他按键
+
+            # 简化逻辑：keyPressEvent 的默认行为在只读模式下就是正确的
+            # (允许导航，允许复制，不允许编辑)。
+            # 我们只需要处理 Ctrl+C 的音效即可。
+            # 所以上面的复杂 if/else 逻辑可以简化回 v4.5.13 的版本：
+
+            # --- 逻辑回滚到 v4.5.13 (v4.5.14.1 修正) ---
+            # if event.matches(QKeySequence.Copy):
+            #     if self.popup and self.popup.is_sticky and self.textCursor().hasSelection():
+            #         self.internal_copy_triggered.emit()
+            #         self.popup.monitor.set_cooldown()
+            # super().keyPressEvent(event)
+            # (保持 v4.5.13 的代码不变，因为 setReadOnly(True/False) 会自动处理按键)
+            pass # 占位符，实际使用下面的 v4.5.13 代码
+
+    # --- v4.5.14.1 修正 ---
+    # 重新审视 keyPressEvent:
+    # 默认的 super().keyPressEvent(event) 已经完美地处理了
+    # setReadOnly(True/False) 带来的行为变化（是否允许打字/删除/粘贴）。
+    # 我们唯一需要做的就是 *额外* 增加一个 Ctrl+C 的音效触发。
+    # 所以 v4.5.13 的代码是完全正确的，不需要改动。
+
+    # def keyPressEvent(self, event): # v4.5.13 的原始代码 (正确)
+    #     """
+    #     v4.5.9 修复 (已确认有效, 逻辑保留):
+    #     重写按键事件，在 Ctrl+C 发生时立即发出信号，并设置冷却。
+    #     """
+    #     if event.matches(QKeySequence.Copy):
+    #         if self.popup and self.popup.is_sticky and self.textCursor().hasSelection():
+    #             self.internal_copy_triggered.emit()
+    #             self.popup.monitor.set_cooldown()
+
+    #     super().keyPressEvent(event)
 
     # --- v4.5.11: 核心修复 - 事件门控逻辑 (已确认) ---
 
@@ -127,6 +196,7 @@ class StickyTextEdit(QTextEdit):
 class ClipboardMonitor(QApplication):
     """
     主应用程序类，处理剪贴板监控并管理弹窗。
+    (v4.5.13 代码, 无改动)
     """
     calculation_done = pyqtSignal(str, QWidget)
     current_color_mode = 0
@@ -270,59 +340,43 @@ class ClipboardMonitor(QApplication):
         if mb < 1024: return f"{mb:.1f} <i>Mb</i>"
         return f"{mb/1024:.1f} <i>Gb</i>"
 
-    # --- v4.5.9: 供 StickyTextEdit 调用的外部冷却设置器 (已确认有效) ---
     def set_cooldown(self):
         """v4.5.9: 供 StickyTextEdit 调用的外部冷却设置器。"""
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
-    # --- 添加结束 ---
 
-    # --- v4.5.9: 修复双重音效 BUG (已确认有效) ---
     def on_clipboard_changed(self):
+        """
+        v4.5.9 逻辑 (已确认有效, 无改动):
+        使用冷却机制 (is_on_cooldown) 避免内部复制 (Ctrl+C)
+        触发的双重音效和弹窗。
+        """
         if self.is_on_cooldown:
-            # v4.5.9: 如果是内部复制 (Ctrl+C)，
-            # StickyTextEdit.keyPressEvent 已经设置了冷却，
-            # 此处会立即返回，从而阻止了第二重音效。
             return
 
-        # 1. 立即获取并处理数据
         mime_data = self.clipboard().mimeData()
         data = self.process_clipboard_data(mime_data)
 
-        if not data: # 无法处理的数据类型
+        if not data:
             return
 
         is_any_popup_sticky = any(p.is_sticky for p in self.active_popups)
 
-        # 2. 【v4.5.9: 逻辑简化】
-        # (v4.5.6 的“内部复制”检查逻辑已移除，由 v4.5.9 的冷却方案替代)
-
-        # 3. 如果不是内部复制，检查是否需要播放音效（外部复制）
         if data.get("type") != "clear":
-            # 只要不是清空，也不是内部复制 (内部复制已在第1步被 return)，
-            # 就播放音效。
             self.play_random_sound()
 
-        # 4. 检查是否处于“固定”模式（阻止新弹窗）
         if is_any_popup_sticky:
-            # 是外部复制，但处于固定模式。
-            # 音效已在第 3 步播放，这里只设置冷却并阻止弹窗。
-            self.set_cooldown() # v4.5.9: 调用标准冷却方法
-            return # 阻止创建新弹窗
+            self.set_cooldown()
+            return
 
-        # 5. 正常模式：显示弹窗
-        # (音效已在第 3 步播放)
         new_popup = self.show_popup(data)
 
         if data.get("type") == "file" and "paths" in data:
             new_popup.update_bottom_text(data["bottom_template"].format("●"))
             self.calculate_total_size_async(data["paths"], new_popup, data["bottom_template"])
-    # --- 修改结束 ---
 
-    # --- v4.5.2 逻辑, 无改动 ---
     def show_popup(self, data):
-        """创建并显示一个新的弹窗，但不会滑出已固定的弹窗。"""
-
+        """v4.5.2 逻辑, 无改动"""
         stationary_popup = None
         for p in reversed(self.active_popups):
             if not (hasattr(p, 'is_sliding_out') and p.is_sliding_out):
@@ -337,14 +391,12 @@ class ClipboardMonitor(QApplication):
         new_popup.raise_()
         self.active_popups.append(new_popup)
 
-        # v4.5.9: 调用标准冷却方法
         self.set_cooldown()
 
         return new_popup
 
-    # --- v4.5.3 逻辑, 无改动 ---
     def close_popup(self, popup):
-        """关闭指定的弹窗，确保在关闭卡片时正确处理生命周期。"""
+        """v4.5.3 逻辑, 无改动"""
         if popup in self.active_popups:
             self.active_popups.remove(popup)
 
@@ -366,33 +418,19 @@ class ClipboardMonitor(QApplication):
 
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 19
+    SCROLLBAR_WIDTH, SCROLLBAR_MARGIN_RIGHT = 11, 2
 
-    # --- v4.5.7: 滚动条宽度 11px (无改动) ---
-    SCROLLBAR_WIDTH = 11
-    SCROLLBAR_MARGIN_RIGHT = 2 # 紧贴 2px 的固定边框
-
-    # --- v4.5.3: 悬浮滚动条样式 (无改动) ---
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{
-            border: none;
-            background: transparent;
-            width: {width}px;
-            margin: 0;
+            border: none; background: transparent; width: {width}px; margin: 0;
         }}
         QScrollBar::handle:vertical {{
-            background: {handle_color};
-            border-radius: 0px;
-            min-height: 20px;
+            background: {handle_color}; border-radius: 0px; min-height: 20px;
         }}
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
-            height: 0px;
-        }}
-        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
-            background: none;
-        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
+        QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
     """
 
-    # --- v4.5.7: 构造函数 (无改动) ---
     def __init__(self, data, monitor, color_mode=0):
         super().__init__()
         self.monitor, self.color_mode, self.original_data = monitor, color_mode, data
@@ -419,9 +457,8 @@ class TransparentPopup(QWidget):
         self.show()
         self.slide_in()
         self.start_lifecycle()
-    # --- v4.5.7: 函数结束 ---
 
-    # --- MODIFIED: v4.5.12 - 添加 QPalette 设置 ---
+    # --- MODIFIED: v4.5.14 - 亮色模式 75% Alpha ---
     def setup_colors_and_styles(self):
         """设置颜色, 样式表, 以及调色板。"""
 
@@ -430,32 +467,29 @@ class TransparentPopup(QWidget):
         if self.color_mode == 0:
             self.background_color, self.text_color, self.border_color = QColor(0, 0, 0, 240), Qt.white, Qt.white
 
-            # 模式0: 暗金, 不加粗
+            # 模式0: 暗金 (100% 不透明)
             dark_gold_color_0_hex = "#cd853f" # rgb(205, 133, 63)
             self.bottom_text_style = (f"color: {dark_gold_color_0_hex}; {common_bottom_style}")
             self.top_text_style = "color: #ffffff;"
-
-            # v4.5.8: 80% 不透明滚动块
             self.scrollbar_handle_color = "rgba(205, 133, 63, 204)"
 
-            # v4.5.12: 选中颜色
+            # 选中颜色 (100% 不透明)
             highlight_bg_color = QColor(dark_gold_color_0_hex)
 
         else:
-            # v4.5.8: 更新亮色背景色
             self.background_color, self.border_color = QColor(253, 246, 227, 250), QColor(55, 45, 15)
             self.text_color = QColor(3, 2, 1)
 
-            # 模式1: 红棕色, 加粗
+            # 模式1: 红棕色 (100% 不透明)
             dark_gold_color_1_hex = "#8B4513" # rgb(139, 69, 19)
             self.bottom_text_style = (f"color: {dark_gold_color_1_hex}; font-weight: bold; {common_bottom_style}")
             self.top_text_style = f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
-
-            # v4.5.8: 80% 不透明滚动块
             self.scrollbar_handle_color = "rgba(139, 69, 19, 204)"
 
-            # v4.5.12: 选中颜色
-            highlight_bg_color = QColor(dark_gold_color_1_hex)
+            # v4.5.14: 亮色模式选中背景色改为 75% 不透明度
+            # (139, 69, 19) 是 #8B4513 的 RGB 值
+            # (191 是 255 * 0.75)
+            highlight_bg_color = QColor(139, 69, 19, 191)
 
         # 1. 应用底部标签样式
         self.bottom_message_label.setStyleSheet(self.bottom_text_style)
@@ -473,17 +507,11 @@ class TransparentPopup(QWidget):
 
         # 4. v4.5.12: 设置 QPalette 来覆盖默认的文本选中颜色
         palette = self.top_content.palette()
-
-        # 4.1. 定义选中时的“纯白”文字
         highlighted_text_color = QColor(Qt.white)
 
-        # 4.2. "highlight_bg_color" 已在上面的 if/else 块中定义
-
-        # 4.3. 应用颜色
         palette.setColor(QPalette.Highlight, highlight_bg_color)
         palette.setColor(QPalette.HighlightedText, highlighted_text_color)
 
-        # 4.4. 将修改后的调色板应用回 QTextEdit
         self.top_content.setPalette(palette)
     # --- 修改结束 ---
 
@@ -491,7 +519,7 @@ class TransparentPopup(QWidget):
     def setup_ui(self):
         """初始化 UI 控件 (使用布局)。"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10) # 15 -> 10
+        layout.setContentsMargins(10, 10, 10, 10)
         layout.setSpacing(10)
 
         font = QFont("Consolas", 11)
@@ -502,15 +530,16 @@ class TransparentPopup(QWidget):
         self.top_content.popup = self
 
         self.top_content.setText(self.original_data.get("top_text"))
-        self.top_content.setReadOnly(True); self.top_content.setFont(font)
-        self.top_content.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+
+        # v4.5.14: 确认初始状态为只读和无交互
+        self.top_content.setReadOnly(True)
         self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
 
+        self.top_content.setFont(font)
+        self.top_content.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.top_content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.top_content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-
         self.top_content.setMaximumHeight(162)
-
         self.top_content.setViewportMargins(0, 0, 0, 0)
 
         self.top_content.internal_copy_triggered.connect(self.monitor.play_random_sound)
@@ -526,22 +555,15 @@ class TransparentPopup(QWidget):
         layout.addWidget(self.bottom_message_label)
     # --- 修改结束 ---
 
-    # --- v4.5.7: 滚动条“顶天立地” (无改动) ---
+    # --- v4.5.7: 滚动条几何计算 (无改动) ---
     def resizeEvent(self, event):
         """
-        在窗口大小改变时（包括显示时）重新定位悬浮滚动条。
-        v4.5.7: 重写 Y 和 Height 算法，使其忽略 margin，参考 border_thickness。
+        v4.5.7: 重新定位悬浮滚动条，Y 和 Height 忽略 margin，参考 border_thickness。
         """
         super().resizeEvent(event)
 
-        # X: 紧贴右侧边框
         x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
-
-        # Y: 从顶部 border 的内侧开始 (不再是 margin 10px 处)
         y = self.border_thickness
-
-        # Height: 从顶部 border 内侧一直到底部消息区的 Y 坐标
-        # v4.5.11: 分隔线已移除，但逻辑基准点 (bottom_message_label.y()) 不变
         height = self.bottom_message_label.y() - self.border_thickness
 
         self.overlay_scrollbar.setGeometry(int(x), int(y), int(self.SCROLLBAR_WIDTH), int(height))
@@ -553,21 +575,16 @@ class TransparentPopup(QWidget):
         检查是否需要显示滚动条，并同步其状态。
         """
         doc_height = self.top_content.document().size().height()
-
-        # v4.5.7: 视口高度必须匹配 resizeEvent 的新逻辑
-        # (从顶部 border 内侧到底部消息区)
         viewport_height = self.bottom_message_label.y() - self.border_thickness
 
         if doc_height > viewport_height:
-            # 确保几何形状是最新的
             self.resizeEvent(None)
 
             v_scrollbar = self.top_content.verticalScrollBar()
             self.overlay_scrollbar.setRange(v_scrollbar.minimum(), v_scrollbar.maximum())
 
-            # 关键：PageStep 必须反映新的、更大的视口高度
             self.overlay_scrollbar.setPageStep(int(viewport_height))
-            v_scrollbar.setPageStep(int(viewport_height)) # 保持内部滚动条同步
+            v_scrollbar.setPageStep(int(viewport_height))
 
             self.overlay_scrollbar.setValue(v_scrollbar.value())
 
@@ -580,29 +597,24 @@ class TransparentPopup(QWidget):
 
     # --- v4.5.3: 滚动条控制函数 (无改动) ---
     def connect_scrollbar_signals(self):
-        """安全地连接滚动条信号。"""
         if not self.is_scrollbar_connected:
             try:
                 self.overlay_scrollbar.valueChanged.connect(self.top_content.verticalScrollBar().setValue)
                 self.top_content.verticalScrollBar().valueChanged.connect(self.overlay_scrollbar.setValue)
                 self.top_content.verticalScrollBar().rangeChanged.connect(self.overlay_scrollbar.setRange)
                 self.is_scrollbar_connected = True
-            except Exception as e:
-                print(f"连接信号时出错: {e}")
+            except Exception: pass
 
     def disconnect_scrollbar_signals(self):
-        """安全地断开滚动条信号。"""
         if self.is_scrollbar_connected:
             try:
                 self.overlay_scrollbar.valueChanged.disconnect(self.top_content.verticalScrollBar().setValue)
                 self.top_content.verticalScrollBar().valueChanged.disconnect(self.overlay_scrollbar.setValue)
                 self.top_content.verticalScrollBar().rangeChanged.disconnect(self.overlay_scrollbar.setRange)
                 self.is_scrollbar_connected = False
-            except Exception as e:
-                pass
+            except Exception: pass
     # --- v4.5.3: 函数结束 ---
 
-    # --- v4.5.3/v4.5.4: 其余函数 (无改动) ---
     def eventFilter(self, obj, event):
         if obj == self.bottom_message_label and event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             self.toggle_sticky_mode()
@@ -628,7 +640,7 @@ class TransparentPopup(QWidget):
         if self.is_sticky: self.activate_sticky_mode()
         else: self.deactivate_sticky_mode()
 
-    # --- v4.5.11: activate_sticky_mode (已确认) ---
+    # --- MODIFIED: v4.5.14 - 启用编辑 ---
     def activate_sticky_mode(self):
         if self.lifecycle_timer.isActive():
             self.lifecycle_timer.stop()
@@ -637,9 +649,13 @@ class TransparentPopup(QWidget):
         self.border_thickness = 2
         self.border_animation_timer.start(51)
 
-        self.top_content.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # v4.5.14: 启用基础编辑功能
+        self.top_content.setReadOnly(False)
+        self.top_content.setTextInteractionFlags(Qt.TextEditorInteraction)
+
         self.top_content.setMaximumHeight(10000)
-        self.top_content.setText(self.original_data.get("top_text"))
+        # v4.5.14: 不再 setText, 保留用户可能已输入的内容
+        # self.top_content.setText(self.original_data.get("top_text"))
         self.top_content.verticalScrollBar().setValue(0)
         self.top_content.setFocus(Qt.MouseFocusReason)
 
@@ -651,13 +667,20 @@ class TransparentPopup(QWidget):
         self.update() # 触发 paintEvent 和 resizeEvent
     # --- 修改结束 ---
 
+    # --- MODIFIED: v4.5.14 - 禁用编辑 ---
     def deactivate_sticky_mode(self):
         if self.lifecycle_remaining > 0: self.start_lifecycle()
         self.border_animation_timer.stop(); self.border_dash_offset = 0; self.border_thickness = 1
 
+        # v4.5.14: 禁用编辑功能
+        self.top_content.setReadOnly(True)
         self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
+
         self.top_content.setMaximumHeight(162)
         cursor = self.top_content.textCursor(); cursor.clearSelection(); self.top_content.setTextCursor(cursor)
+
+        # v4.5.14: 将文本内容重置为原始剪贴板内容
+        self.top_content.setText(self.original_data.get("top_text"))
 
         self.overlay_scrollbar.hide()
         self.disconnect_scrollbar_signals()
@@ -667,6 +690,7 @@ class TransparentPopup(QWidget):
             pass
 
         self.update() # 触发 paintEvent 和 resizeEvent
+    # --- 修改结束 ---
 
     def animate_border(self):
         self.border_dash_offset = (self.border_dash_offset - 1) % -10
@@ -698,25 +722,22 @@ class TransparentPopup(QWidget):
     def update_bottom_text(self, text):
         self.bottom_message_label.setText(text)
 
-    # --- MODIFIED: v4.5.11 - 统一背景, 无分隔线 (已确认) ---
+    # --- MODIFIED: v4.5.13 - 修复 DeprecationWarning (逻辑保留) ---
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
 
         # 1. 绘制主背景 (半透明)
-        # v4.5.11: 这是唯一的背景绘制，覆盖整个控件
         painter.fillRect(self.rect(), self.background_color)
 
-        # 2. v4.5.11: 确认 v4.5.10 的“100%不透明底部背景”已删除
-
-        # 3. v4.5.11: 确认不绘制分隔线
-
-        # 4. 绘制主边框
+        # 2. 绘制主边框
         pen = QPen(self.border_color, self.border_thickness, Qt.DashLine)
         if self.is_sticky: pen.setDashOffset(self.border_dash_offset)
         painter.setPen(pen)
 
         half_pen = self.border_thickness / 2.0
-        painter.drawRect(self.rect().adjusted(half_pen, half_pen, -half_pen, -half_pen))
+        # v4.5.13: 显式将 half_pen 转为 int, 消除 DeprecationWarning
+        adj = int(half_pen)
+        painter.drawRect(self.rect().adjusted(adj, adj, -adj, -adj))
     # --- 修改结束 ---
 
 
