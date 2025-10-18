@@ -1,32 +1,29 @@
-# q5.py (v4.5.31 - 滚动条终极修复 v8)
+# q7.py (v4.5.33 - 边界与截断最终修复 v10)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.31 版本特性 (基于 v4.5.30):
-- 【Bug 7 最终修复】滚动条“指哪打哪” (v8)
-  - 问题: v4.5.30 的比例跳转逻辑因未考虑滑块高度而完全失败。
-  - 根源: 计算比例时，分母应该是“轨道高度 - 滑块高度”，
-    并且计算时应以将“滑块中心”移动到“点击点”为目标。
-  - 解决方案: 在 `ClickJumpScrollBar.mouseReleaseEvent` 中，
-    实现一个数学上更严谨的跳转算法，该算法将滑块自身尺寸
-    纳入了计算，实现了真正的“指哪打哪”。
+v4.5.33 版本特性 (基于 v4.5.32):
+- 【Bug 8 终极修复】滚动条“顶天立地” (v4)
+  - 问题: v4.5.32 的 `padding: 0px` 修复失败，上下仍有空隙。
+  - 根源: (推测) `::groove` (轨道) 或 `::handle` (滑块)
+    本身还存在隐藏的 margin 或 padding。
+  - 解决方案: “地毯式”清理样式表。
+    为 `::groove`, `::handle`, `::add-page`, `::sub-page`
+    等所有子控件强制添加 `margin: 0px; padding: 0px;`，
+    物理上消除所有产生间隙的可能。
 
-- 【Bug 8 修复】滚动条失去“顶天立地”设定的退步 (v2)
-  - 问题: v4.5.30 中，滚动块上下出现了空隙，无法贴合轨道两端。
-  - 根源: Qt 样式表中，即使将 add-line/sub-line 的 height
-    设为 0，某些 QStyle 依然会为其保留边距 (margin)。
-  - 解决方案: 在样式表中，为 add-line/sub-line 添加
-    `border: none; background: none; margin: 0px;`
-    等更强的重置规则，彻底抹除其占位，恢复“顶天立地”。
-
-- 【Bug 9 修复】滚动条右侧出现巨大空隙的退步 (v2)
-  - 问题: v4.5.30 中，滚动块不再贴合窗口右侧虚线。
-  - 根源: 滚动块的 X 坐标是相对于内部 QTextEdit 计算的，
-    当 QTextEdit 居中时，滚动块也被向左移动了。
-  - 解决方案: 在 `TransparentPopup.resizeEvent` 中，
-    修改 X 坐标的计算方式，不再依赖 QTextEdit，而是直接
-    相对于父窗口的宽度进行定位，确保其位置永远稳定在窗口右侧。
+- 【Bug 10 修复】多文件列表截断逻辑 (v1)
+  - 问题: (来自用户的“有意思的图”)
+    当有 8 个文件时，我的代码会显示 7 个文件 +
+    第 8 行的 "... (等 1 个)"，总计 8 行。
+  - 根源: 截断逻辑不完善。
+  - 解决方案: 重新实现截断逻辑。
+    1. 设定 `MAX_DISPLAY_LINES = 7`。
+    2. 如果文件数 > 7，则只显示前 6 个
+       (`MAX_DISPLAY_LINES - 1`)。
+    3. 第 7 行显示 "... (等 {count - 6} 个)"。
+    4. 这确保了弹窗最多只显示 7 行，与用户截图行为一致。
 """
 import sys
 import os
@@ -95,81 +92,85 @@ class StickyTextEdit(QTextEdit):
         super().keyPressEvent(event)
 
 
-# --- MODIFIED: v4.5.31 - 滚动条终极修复 (v8) ---
+# --- v4.5.32 (无改动): 滚动条事件拦截 (v9) ---
 class ClickJumpScrollBar(QScrollBar):
-    """
-    v4.5.31: 滚动条 Bug 最终修复 (v8) - “指哪打哪”
-
-    v4.5.30 (v7) 的比例跳转逻辑因未考虑滑块高度而完全失败。
-    v4.5.31 (v8) 的逻辑使用了一个数学上更严谨的算法，将
-    滑块自身的高度纳入计算，实现了精确的点击跳转。
-    """
     def __init__(self, parent=None):
         super().__init__(parent)
         self.press_pos = QPoint()
-        self.press_value = 0
 
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.button() != Qt.LeftButton:
+            self.press_pos = QPoint()
+            super().mousePressEvent(event)
+            return
+
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
+        handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
+
+        if handle_rect.contains(event.pos()):
+            self.press_pos = QPoint()
+            super().mousePressEvent(event)
+        else:
             self.press_pos = event.pos()
-            self.press_value = self.value()
-        super().mousePressEvent(event)
+            pass # 阻止默认的“翻一页”
 
     def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        if event.button() != Qt.LeftButton: return
+        if event.button() != Qt.LeftButton:
+            super().mouseReleaseEvent(event)
+            return
+
+        if self.press_pos.isNull():
+            super().mouseReleaseEvent(event)
+            return
+
         moved = (event.pos() - self.press_pos).manhattanLength() > QApplication.startDragDistance()
-        value_changed = (self.value() != self.press_value)
-        if moved or value_changed:
-            self.press_pos = QPoint(); return
+        click_pos = self.press_pos
+        self.press_pos = QPoint()
 
-        opt = QStyleOptionSlider(); self.initStyleOption(opt)
+        if moved:
+            super().mouseReleaseEvent(event)
+            return
+
+        opt = QStyleOptionSlider()
+        self.initStyleOption(opt)
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
-        if handle_rect.contains(self.press_pos): return # 点击在滑块上
-
-        # --- MODIFIED: v4.5.31 修复 Bug 7 (“指哪打哪”的最终实现) ---
         track_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarGroove, self)
-        if not track_rect.isValid() or track_rect.isEmpty(): return
+
+        if not track_rect.isValid() or track_rect.isEmpty():
+            super().mouseReleaseEvent(event); return
 
         if self.orientation() == Qt.Vertical:
             handle_height = handle_rect.height()
             track_height = track_rect.height()
-            # 可移动范围 = 轨道高度 - 滑块高度
             movable_range = track_height - handle_height
-            if movable_range <= 0: return # 轨道太小无法移动
+            if movable_range <= 0:
+                super().mouseReleaseEvent(event); return
 
-            # 目标位置：将滑块的中心移动到点击点
-            # 点击点相对于轨道顶部的距离
-            relative_y = self.press_pos.y() - track_rect.top()
-            # 目标滑块顶部位置 = 点击点 - 滑块高度的一半
+            relative_y = click_pos.y() - track_rect.top()
             target_handle_top = relative_y - handle_height / 2.0
-
-            # 计算新位置在可移动范围内的比例
             ratio = target_handle_top / movable_range
-        else: # 水平方向
+        else:
             handle_width = handle_rect.width()
             track_width = track_rect.width()
             movable_range = track_width - handle_width
-            if movable_range <= 0: return
+            if movable_range <= 0:
+                super().mouseReleaseEvent(event); return
 
-            relative_x = self.press_pos.x() - track_rect.left()
+            relative_x = click_pos.x() - track_rect.left()
             target_handle_left = relative_x - handle_width / 2.0
             ratio = target_handle_left / movable_range
 
-        # 钳制比例在 0.0 到 1.0 之间
         ratio = max(0.0, min(1.0, ratio))
-
-        # 根据比例计算新的 value
         value_range = self.maximum() - self.minimum()
         new_value = self.minimum() + round(ratio * value_range)
+
         self.setValue(int(new_value))
-        # --- 修复结束 ---
-
-        self.press_pos = QPoint()
+        super().mouseReleaseEvent(event)
 
 
+# --- MODIFIED: v4.5.33 - 修复 Bug 10 ---
 class ClipboardMonitor(QApplication):
-    """ 主应用程序类 (v4.5.30, 无改动) """
     calculation_done = pyqtSignal(str, QWidget)
     current_color_mode = 0
     COOLDOWN_TIME_MS = 100
@@ -238,16 +239,35 @@ class ClipboardMonitor(QApplication):
                     if len(bottom_text) > 50: bottom_text = bottom_text[:47] + "..."
                     return {"type": "other", "top_text": top_text, "bottom_text": bottom_text}
                 return None
-            count, num_files, num_folders = len(local_paths), sum(1 for p in local_paths if os.path.isfile(p)), sum(1 for p in local_paths if os.path.isdir(p))
+
+            count = len(local_paths)
+            num_files = sum(1 for p in local_paths if os.path.isfile(p))
+            num_folders = sum(1 for p in local_paths if os.path.isdir(p))
+
             if count == 1:
-                top_text, bottom_template = os.path.basename(local_paths[0]), "文件夹: {}" if num_folders == 1 else "文件: {}"
+                top_text = os.path.basename(local_paths[0])
+                bottom_template = "文件夹: {}" if num_folders == 1 else "文件: {}"
             else:
-                top_text = "\n".join([os.path.basename(p) for p in local_paths[:7]])
-                if count > 7: top_text += f"\n... (等 {count - 7} 个)"
+                # --- MODIFIED: v4.5.33 修复 Bug 10 (截断逻辑) ---
+                MAX_DISPLAY_LINES = 7
+                if count > MAX_DISPLAY_LINES:
+                    # e.g. 8 items: Show 6 items (index 0-5)
+                    items_to_show = [os.path.basename(p) for p in local_paths[:MAX_DISPLAY_LINES - 1]]
+                    # e.g. 8 - 6 = 2
+                    remaining = count - (MAX_DISPLAY_LINES - 1)
+                    top_text = "\n".join(items_to_show)
+                    top_text += f"\n... (等 {remaining} 个)"
+                else:
+                    # 7 items or less: Show all
+                    top_text = "\n".join([os.path.basename(p) for p in local_paths])
+                # --- 修复结束 ---
+
                 if num_files > 0 and num_folders > 0: bottom_template = f"{count} 个项目: {{}}"
                 elif num_folders > 0: bottom_template = f"{count} 个文件夹: {{}}"
                 else: bottom_template = f"{count} 个文件: {{}}"
+
             return {"type": "file", "top_text": top_text, "bottom_template": bottom_template, "paths": local_paths}
+
         if mime_data.hasImage():
             pixmap = self.clipboard().pixmap()
             if pixmap.isNull(): return None
@@ -326,25 +346,39 @@ class ClipboardMonitor(QApplication):
         if hasattr(self, 'executor'): self.executor.shutdown(wait=True)
 
 
-# --- MODIFIED: v4.5.31 - 修复三个滚动条 Bug ---
+# --- MODIFIED: v4.5.33 - 修复 Bug 8 ---
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 19
-    SCROLLBAR_WIDTH, SCROLLBAR_MARGIN_RIGHT = 11, 10 # <-- MODIFIED: v4.5.31 调整右边距
+    SCROLLBAR_WIDTH = 11
+    SCROLLBAR_MARGIN_RIGHT = 2 # v4.5.32 已修复 (保持 2)
     TEXT_LOAD_THRESHOLD_BYTES = 100 * 1024
 
-    # --- MODIFIED: v4.5.31 修复 Bug 8 (上下空隙) ---
+    # --- MODIFIED: v4.5.33 修复 Bug 8 (上下空隙 v4) ---
+    # “地毯式”清理，为所有子控件添加 margin/padding
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{
-            border: none; background: transparent; width: {width}px; margin: 0;
+            border: none; background: transparent;
+            width: {width}px;
+            margin: 0;
+            padding: 0px;
+        }}
+        QScrollBar::groove:vertical {{
+            border: none; background: transparent;
+            margin: 0px; padding: 0px;
         }}
         QScrollBar::handle:vertical {{
-            background: {handle_color}; border-radius: 0px; min-height: 20px;
+            background: {handle_color}; border-radius: 0px;
+            min-height: 20px;
+            margin: 0px; /* v4.5.33 新增 */
         }}
         QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
             border: none; background: none; height: 0px; margin: 0px;
+            padding: 0px;
         }}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
             background: none;
+            margin: 0px; /* v4.5.33 新增 */
+            padding: 0px; /* v4.5.33 新增 */
         }}
     """
     # --- 修复结束 ---
@@ -366,7 +400,7 @@ class TransparentPopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
 
-        # v4.5.31: 使用 v8 版的滚动条
+        # v4.5.32 (v9) 版的滚动条
         self.overlay_scrollbar = ClickJumpScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical); self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
@@ -401,8 +435,11 @@ class TransparentPopup(QWidget):
             highlight_bg_color = QColor(139, 69, 19, 191)
         self.bottom_message_label.setStyleSheet(self.bottom_text_style)
         self.top_content.setStyleSheet(f"QTextEdit {{ border: none; background-color: transparent; padding: 0; {self.top_text_style} }}")
+
+        # 应用 v4.5.33 的样式表
         scroll_style = self.OVERLAY_SCROLLBAR_STYLE_SHEET.format(width=self.SCROLLBAR_WIDTH, handle_color=self.scrollbar_handle_color)
         self.overlay_scrollbar.setStyleSheet(scroll_style)
+
         palette = self.top_content.palette(); palette.setColor(QPalette.Highlight, highlight_bg_color)
         palette.setColor(QPalette.HighlightedText, QColor(Qt.white)); self.top_content.setPalette(palette)
 
@@ -437,22 +474,13 @@ class TransparentPopup(QWidget):
             if self.is_sticky: QTimer.singleShot(0, self.update_overlay_scrollbar)
         except RuntimeError: pass
 
-    # --- MODIFIED: v4.5.31 修复 Bug 9 (右侧空隙) ---
+    # v4.5.32 已修复 (保持)
     def resizeEvent(self, event):
         super().resizeEvent(event)
-
-        # 获取 top_content 相对于父窗口的几何信息
         widget_geom = self.top_content.geometry()
-
-        # 新的 X 坐标计算逻辑：
-        # 不再依赖 widget_geom.right()，而是直接从父窗口宽度计算
-        # 确保滚动条永远贴合在窗口右侧
         x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
-
         y, height = widget_geom.top(), widget_geom.height()
-
         self.overlay_scrollbar.setGeometry(int(x), int(y), int(self.SCROLLBAR_WIDTH), int(height))
-    # --- 修复结束 ---
 
     def update_overlay_scrollbar(self):
         doc_height = self.top_content.document().size().height()
