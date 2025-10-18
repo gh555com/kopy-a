@@ -548,7 +548,9 @@ class TransparentPopup(QWidget):
         painter.drawRect(self.rect().adjusted(adj, adj, -adj, -adj))
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":tf-8 -*-
+"""
+一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling); QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = ClipboardMonitor(sys.argv)
     print("="*20 + " 系统可用字体家族名列表 " + "="*20)
