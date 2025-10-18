@@ -1,14 +1,24 @@
-# q3.py (v4.5.5 - Fix Sticky Mode Sound)
+# q3.py (v4.5.9 - Pan/Sound/HiDPI Fix)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.5 版本特性 (基于 v4.5.4):
-- 【BUG 修复】
-  - 修复了在“固定模式”(Sticky Mode)下，从外部复制内容时没有音效的问题。
-  - (重构 on_clipboard_changed 逻辑，将音效播放 'play_random_sound()'
-    移动到“超级固定”检查 'is_any_popup_sticky' 之前执行)。
-- (保留) v4.5.4 的所有功能 (分隔线、覆盖式滚动条、同步音效等)。
+v4.5.9 版本特性 (基于 v4.5.8):
+- 【核心修复】禁止画布平移 (新方案):
+  - 移除了 v4.5.8 中低效的 mouseMoveEvent 重写 (性能恢复)。
+  - 改为在 StickyTextEdit.__init__ 和 activate_sticky_mode 中，
+    强制设置 self.horizontalScrollBar().setRange(0, 0)。
+  - 这会从根本上阻止 QAbstractScrollArea 响应拖拽到边界的“边缘滚动”
+    (Pan) 行为，画布 100% 锁死。
+- 【核心修复】双重音效 (新方案):
+  - StickyTextEdit.keyPressEvent (Ctrl+C) 在播放音效后，
+    会立即调用 self.popup.monitor.set_cooldown() 来设置冷却。
+  - ClipboardMonitor.on_clipboard_changed 检查冷却时，会立即返回，
+    从而阻止播放第二重音效。
+  - 移除了 on_clipboard_changed 中复杂易错的“内部复制”检查逻辑。
+- 【UI 修复】分隔线 1 物理像素 (HiDPI Fix):
+  - 在 paintEvent 中，绘制分隔线的 QPen 被设为 line_pen.setCosmetic(True)。
+  - 这确保了无论屏幕 DPI 缩放比例如何，分隔线始终绘制为 1 物理像素。
 """
 import sys
 import os
@@ -52,10 +62,11 @@ def _get_path_size(path):
 # --- 文件大小计算函数结束 ---
 
 
-# --- v4.5.3: StickyTextEdit 类 (无改动) ---
+# --- MODIFIED: v4.5.9 - 修复画布平移 & 双重音效 ---
 class StickyTextEdit(QTextEdit):
     """
-    一个自定义的 QTextEdit，用于在固定模式下正确处理复制音效。
+    一个自定义的 QTextEdit，用于在固定模式下正确处理复制音效，
+    并修复拖拽选择时画布平移(panning)的 BUG。
     """
     internal_copy_triggered = pyqtSignal()
 
@@ -63,16 +74,27 @@ class StickyTextEdit(QTextEdit):
         super().__init__(parent)
         self.popup = None
 
+        # v4.5.9: 彻底禁止水平滚动，防止画布平移
+        # 通过将范围设为 (0,0)，QAbstractScrollArea 认为无内容可滚动，
+        # 从而禁用了鼠标拖拽到边缘时的“边缘滚动” (Pan) 行为。
+        self.horizontalScrollBar().setRange(0, 0)
+
     def keyPressEvent(self, event):
         """
-        重写按键事件，在 Ctrl+C 发生时立即发出信号。
+        重写按键事件，在 Ctrl+C 发生时立即发出信号，并设置冷却。
         """
         if event.matches(QKeySequence.Copy):
             if self.popup and self.popup.is_sticky and self.textCursor().hasSelection():
+                # v4.5.3: 内部复制音效
                 self.internal_copy_triggered.emit()
+                # v4.5.9: 立即设置冷却，防止 on_clipboard_changed 播放第二声
+                self.popup.monitor.set_cooldown()
 
+        # 必须调用父类的方法来完成实际的复制操作
         super().keyPressEvent(event)
-# --- v4.5.3: 类定义结束 ---
+
+    # v4.5.9: 移除了 v4.5.8 中 mouseMoveEvent 的重写，恢复性能
+# --- 修改结束 ---
 
 
 class ClipboardMonitor(QApplication):
@@ -221,45 +243,49 @@ class ClipboardMonitor(QApplication):
         if mb < 1024: return f"{mb:.1f} <i>Mb</i>"
         return f"{mb/1024:.1f} <i>Gb</i>"
 
-    # --- MODIFIED: v4.5.5 - 重构音效逻辑 ---
+    # --- v4.5.9: 供 StickyTextEdit 调用的外部冷却设置器 ---
+    def set_cooldown(self):
+        """v4.5.9: 供 StickyTextEdit 调用的外部冷却设置器。"""
+        self.is_on_cooldown = True
+        QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
+    # --- 添加结束 ---
+
+    # --- MODIFIED: v4.5.9 - 修复双重音效 BUG ---
     def on_clipboard_changed(self):
         if self.is_on_cooldown:
+            # v4.5.9: 如果是内部复制 (Ctrl+C)，
+            # StickyTextEdit.keyPressEvent 已经设置了冷却，
+            # 此处会立即返回，从而阻止了第二重音效。
             return
 
         # 1. 立即获取并处理数据
         mime_data = self.clipboard().mimeData()
         data = self.process_clipboard_data(mime_data)
 
-        if not data: # 无法处理的数据类型 (e.g. process_clipboard_data 返回 None)
+        if not data: # 无法处理的数据类型
             return
 
-        sticky_popups = [p for p in self.active_popups if p.is_sticky]
-        is_any_popup_sticky = bool(sticky_popups)
+        is_any_popup_sticky = any(p.is_sticky for p in self.active_popups)
 
-        # 2. 检查是否为“内部复制”
-        if data.get("type") == "text" and is_any_popup_sticky:
-            new_text = data["top_text"]
-            for p in sticky_popups:
-                if p.top_content.hasFocus() and p.top_content.textCursor().hasSelection() and p.top_content.textCursor().selectedText() == new_text:
-                    # 内部复制，音效已由 keyPressEvent 处理
-                    self.is_on_cooldown = True
-                    QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
-                    return # 阻止后续处理
+        # 2. 【v4.5.9: 逻辑简化】
+        # 移除了 v4.5.6/v4.5.8 中复杂(且易错)的“内部复制”检查。
+        # 该逻辑已前移到 StickyTextEdit.keyPressEvent 中。
 
-        # 3. 【核心修复】播放音效（只要不是“内部复制”或“清空”）
+        # 3. 如果不是内部复制，检查是否需要播放音效（外部复制）
         if data.get("type") != "clear":
+            # 只要不是清空，也不是内部复制 (内部复制已在第1步被 return)，
+            # 就播放音效。
             self.play_random_sound()
 
-        # 4. 检查是否处于“超级固定”模式
+        # 4. 检查是否处于“固定”模式（阻止新弹窗）
         if is_any_popup_sticky:
             # 是外部复制，但处于固定模式。
             # 音效已在第 3 步播放，这里只设置冷却并阻止弹窗。
-            self.is_on_cooldown = True
-            QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
+            self.set_cooldown() # v4.5.9: 调用标准冷却方法
             return # 阻止创建新弹窗
 
         # 5. 正常模式：显示弹窗
-        # (音效已在第 3 步播放，这里不再需要播放)
+        # (音效已在第 3 步播放)
         new_popup = self.show_popup(data)
 
         if data.get("type") == "file" and "paths" in data:
@@ -285,8 +311,8 @@ class ClipboardMonitor(QApplication):
         new_popup.raise_()
         self.active_popups.append(new_popup)
 
-        self.is_on_cooldown = True
-        QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
+        # v4.5.9: 调用标准冷却方法
+        self.set_cooldown()
 
         return new_popup
 
@@ -314,8 +340,10 @@ class ClipboardMonitor(QApplication):
 
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 19
-    SCROLLBAR_WIDTH = 4
-    SCROLLBAR_MARGIN_RIGHT = 4
+
+    # --- v4.5.7: 滚动条宽度 11px (无改动) ---
+    SCROLLBAR_WIDTH = 11
+    SCROLLBAR_MARGIN_RIGHT = 2 # 紧贴 2px 的固定边框
 
     # --- v4.5.3: 悬浮滚动条样式 (无改动) ---
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
@@ -338,12 +366,14 @@ class TransparentPopup(QWidget):
         }}
     """
 
-    # --- v4.5.4: 构造函数 (无改动) ---
+    # --- v4.5.7: 构造函数 (无改动) ---
     def __init__(self, data, monitor, color_mode=0):
         super().__init__()
         self.monitor, self.color_mode, self.original_data = monitor, color_mode, data
         self.is_sticky, self.border_thickness, self.border_dash_offset = False, 1, 0
         self.lifecycle_remaining, self.lifecycle_start_time = self.LIFECYCLE_SECONDS * 1000, None
+
+        self.separator_color = QColor(Qt.transparent)
 
         self.border_animation_timer = QTimer(self)
         self.border_animation_timer.timeout.connect(self.animate_border)
@@ -352,40 +382,56 @@ class TransparentPopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
 
-        # v4.5.4: 修正顺序
         self.overlay_scrollbar = QScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical)
         self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
 
         self.setup_ui()
-        self.setup_colors_and_styles() # v4.5.4: 样式在UI创建后应用
+        self.setup_colors_and_styles()
 
         self.target_screen_geom = self.get_current_screen_geometry()
         self.move_to_initial_position()
         self.show()
         self.slide_in()
         self.start_lifecycle()
-    # --- v4.5.4: 函数结束 ---
+    # --- v4.5.7: 函数结束 ---
 
-    # --- v4.5.4: 样式函数 (无改动) ---
+    # --- v4.5.8: 颜色/透明度/背景色 (无改动) ---
     def setup_colors_and_styles(self):
         """设置颜色并 *立即应用* 样式表。"""
+
+        common_bottom_style = "padding-top: 8px;"
+
         if self.color_mode == 0:
             self.background_color, self.text_color, self.border_color = QColor(0, 0, 0, 240), Qt.white, Qt.white
-            # v4.5.4: 增加 'border-top' (分隔线) 和 'padding-top' (间距)
-            self.bottom_text_style = "color: #cd853f; border-top: 1px solid rgba(255, 255, 255, 50); padding-top: 8px;"
-            self.top_text_style = "color: #ffffff;"
-            self.scrollbar_handle_color = "rgba(136, 136, 136, 150)"
-        else:
-            self.background_color, self.border_color = QColor(238, 232, 213, 250), QColor(55, 45, 15)
-            self.text_color = QColor(3, 2, 1)
-            # v4.5.4: 增加 'border-top' (分隔线) 和 'padding-top' (间距)
-            self.bottom_text_style = "color: #8B4513; font-weight: bold; border-top: 1px solid rgba(139, 69, 19, 70); padding-top: 8px;"
-            self.top_text_style = f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
-            self.scrollbar_handle_color = "rgba(139, 69, 19, 150)"
 
-        # 1. 应用底部标签样式 (含分隔线)
+            # 模式0: 暗金, 不加粗
+            dark_gold_color_0_hex = "#cd853f" # rgb(205, 133, 63)
+            self.bottom_text_style = (f"color: {dark_gold_color_0_hex}; {common_bottom_style}")
+            self.top_text_style = "color: #ffffff;"
+
+            # v4.5.8: 80% 不透明滚动块 (255 * 0.8 = 204)
+            self.scrollbar_handle_color = "rgba(205, 133, 63, 204)"
+            # v4.5.8: 100% 不透明分隔线
+            self.separator_color = QColor(205, 133, 63, 255)
+
+        else:
+            # v4.5.8: 更新亮色背景色
+            self.background_color, self.border_color = QColor(253, 246, 227, 250), QColor(55, 45, 15)
+            self.text_color = QColor(3, 2, 1)
+
+            # 模式1: 红棕色, 加粗
+            dark_gold_color_1_hex = "#8B4513" # rgb(139, 69, 19)
+            self.bottom_text_style = (f"color: {dark_gold_color_1_hex}; font-weight: bold; {common_bottom_style}")
+            self.top_text_style = f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()});"
+
+            # v4.5.8: 80% 不透明滚动块
+            self.scrollbar_handle_color = "rgba(139, 69, 19, 204)"
+            # v4.5.8: 100% 不透明分隔线
+            self.separator_color = QColor(139, 69, 19, 255)
+
+        # 1. 应用底部标签样式
         self.bottom_message_label.setStyleSheet(self.bottom_text_style)
 
         # 2. 应用顶部文本样式
@@ -398,18 +444,19 @@ class TransparentPopup(QWidget):
             width=self.SCROLLBAR_WIDTH, handle_color=self.scrollbar_handle_color
         )
         self.overlay_scrollbar.setStyleSheet(scroll_style)
-    # --- v4.5.4: 函数结束 ---
+    # --- 修改结束 ---
 
-    # --- v4.5.4: UI Setup (无改动) ---
+    # --- v4.5.8: setup_ui (无改动) ---
     def setup_ui(self):
         """初始化 UI 控件 (使用布局)。"""
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setContentsMargins(10, 10, 10, 10) # 15 -> 10
         layout.setSpacing(10)
 
         font = QFont("Consolas", 11)
         font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"])
 
+        # v4.5.8: top_content 现在是 StickyTextEdit 的实例
         self.top_content = StickyTextEdit(self)
         self.top_content.popup = self
 
@@ -436,32 +483,50 @@ class TransparentPopup(QWidget):
         layout.addWidget(self.top_content)
         layout.addStretch()
         layout.addWidget(self.bottom_message_label)
-    # --- v4.5.4: 函数结束 ---
+    # --- 修改结束 ---
 
-    # --- v4.5.3: 滚动条控制函数 (无改动) ---
+    # --- v4.5.7: 滚动条“顶天立地” (无改动) ---
     def resizeEvent(self, event):
         """
         在窗口大小改变时（包括显示时）重新定位悬浮滚动条。
+        v4.5.7: 重写 Y 和 Height 算法，使其忽略 margin，参考 border_thickness。
         """
         super().resizeEvent(event)
-        x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
-        y = self.top_content.y()
-        height = self.top_content.height()
-        self.overlay_scrollbar.setGeometry(x, y, self.SCROLLBAR_WIDTH, height)
 
+        # X: 紧贴右侧边框
+        x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
+
+        # Y: 从顶部 border 的内侧开始 (不再是 margin 10px 处)
+        y = self.border_thickness
+
+        # Height: 从顶部 border 内侧一直到底部分隔线的 Y 坐标
+        height = self.bottom_message_label.y() - self.border_thickness
+
+        self.overlay_scrollbar.setGeometry(int(x), int(y), int(self.SCROLLBAR_WIDTH), int(height))
+    # --- 修改结束 ---
+
+    # --- v4.5.7: 滚动条视口 (无改动) ---
     def update_overlay_scrollbar(self):
         """
         检查是否需要显示滚动条，并同步其状态。
         """
         doc_height = self.top_content.document().size().height()
-        viewport_height = self.top_content.viewport().height()
+
+        # v4.5.7: 视口高度必须匹配 resizeEvent 的新逻辑
+        # (从顶部 border 内侧到底部分隔线)
+        viewport_height = self.bottom_message_label.y() - self.border_thickness
 
         if doc_height > viewport_height:
+            # 确保几何形状是最新的
             self.resizeEvent(None)
 
             v_scrollbar = self.top_content.verticalScrollBar()
             self.overlay_scrollbar.setRange(v_scrollbar.minimum(), v_scrollbar.maximum())
-            self.overlay_scrollbar.setPageStep(v_scrollbar.pageStep())
+
+            # 关键：PageStep 必须反映新的、更大的视口高度
+            self.overlay_scrollbar.setPageStep(int(viewport_height))
+            v_scrollbar.setPageStep(int(viewport_height)) # 保持内部滚动条同步
+
             self.overlay_scrollbar.setValue(v_scrollbar.value())
 
             self.connect_scrollbar_signals()
@@ -469,7 +534,9 @@ class TransparentPopup(QWidget):
         else:
             self.overlay_scrollbar.hide()
             self.disconnect_scrollbar_signals()
+    # --- 修改结束 ---
 
+    # --- v4.5.3: 滚动条控制函数 (无改动) ---
     def connect_scrollbar_signals(self):
         """安全地连接滚动条信号。"""
         if not self.is_scrollbar_connected:
@@ -519,13 +586,14 @@ class TransparentPopup(QWidget):
         if self.is_sticky: self.activate_sticky_mode()
         else: self.deactivate_sticky_mode()
 
+    # --- MODIFIED: v4.5.9 - 强化画布平移修复 ---
     def activate_sticky_mode(self):
         if self.lifecycle_timer.isActive():
             self.lifecycle_timer.stop()
             self.lifecycle_remaining = max(0, self.lifecycle_remaining - self.lifecycle_start_time.msecsTo(QTime.currentTime()))
 
         self.border_thickness = 2
-        self.border_animation_timer.start(47)
+        self.border_animation_timer.start(51)
 
         self.top_content.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.top_content.setMaximumHeight(10000)
@@ -533,10 +601,15 @@ class TransparentPopup(QWidget):
         self.top_content.verticalScrollBar().setValue(0)
         self.top_content.setFocus(Qt.MouseFocusReason)
 
+        # v4.5.9: 再次禁用水平滚动，防止画布平移
+        # (在 StickyTextEdit.__init__ 中已设置，此处为双重保险)
+        self.top_content.horizontalScrollBar().setRange(0, 0)
+
         QTimer.singleShot(0, self.update_overlay_scrollbar)
         self.top_content.textChanged.connect(self.update_overlay_scrollbar)
 
-        self.update()
+        self.update() # 触发 paintEvent 和 resizeEvent
+    # --- 修改结束 ---
 
     def deactivate_sticky_mode(self):
         if self.lifecycle_remaining > 0: self.start_lifecycle()
@@ -553,7 +626,7 @@ class TransparentPopup(QWidget):
         except TypeError:
             pass
 
-        self.update()
+        self.update() # 触发 paintEvent 和 resizeEvent
 
     def animate_border(self):
         self.border_dash_offset = (self.border_dash_offset - 1) % -10
@@ -585,14 +658,33 @@ class TransparentPopup(QWidget):
     def update_bottom_text(self, text):
         self.bottom_message_label.setText(text)
 
+    # --- MODIFIED: v4.5.9 - 修复分隔线 1px (HiDPI Fix) ---
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
+
+        # 1. 绘制背景
         painter.fillRect(self.rect(), self.background_color)
+
+        # 2. 绘制自定义分隔线 (在主边框 *之下*)
+        y_separator = self.bottom_message_label.y()
+        x_start = self.border_thickness
+        x_end = self.width() - self.border_thickness
+
+        # 宽度硬编码为 1px
+        line_pen = QPen(self.separator_color, 1, Qt.SolidLine)
+        # v4.5.9: 设为 Cosmetic 保证 1 物理像素宽度，不受 DPI 缩放影响
+        line_pen.setCosmetic(True)
+        painter.setPen(line_pen)
+        painter.drawLine(int(x_start), int(y_separator), int(x_end), int(y_separator))
+
+        # 3. 绘制主边框 (在分隔线 *之上*, 覆盖两端)
         pen = QPen(self.border_color, self.border_thickness, Qt.DashLine)
         if self.is_sticky: pen.setDashOffset(self.border_dash_offset)
         painter.setPen(pen)
-        painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
-    # --- 函数结束 ---
+
+        half_pen = self.border_thickness / 2.0
+        painter.drawRect(self.rect().adjusted(half_pen, half_pen, -half_pen, -half_pen))
+    # --- 修改结束 ---
 
 
 if __name__ == "__main__":
