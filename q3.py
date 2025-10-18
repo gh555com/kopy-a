@@ -540,6 +540,20 @@ if __name__ == "__main__":
     print("="*20 + " 系统可用字体家族名列表 " + "="*20)
     db = QFontDatabase(); print(sorted(list(set(QFont(name).family() for name in db.families()))))
     print("="*63)
+    v4.5.16 版本特性 (基于 v4.5.15):
+    - 【Bug 修复】修复 v4.5.15 中引入的
     signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
     timer = QTimer(); timer.start(50); timer.timeout.connect(lambda: None)
     sys.exit(app.exec_())
+
+
+
+
+调用了 setDragEna QTextEdit 应使用 self.setAcceptDrops(False)
+    来禁用拖放功能，这同样能修复光标变化问
+
+
+bled (这是 QAbstractItemView 的方法)。
+  - 解决方案: 对
+
+
