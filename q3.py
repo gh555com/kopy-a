@@ -21,7 +21,7 @@ import random
 import glob
 from PyQt5.QtWidgets import QApplication, QWidget, QLabel, QVBoxLayout
 from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
-                          QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl)
+                          QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl, QElapsedTimer)
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtGui import QFont, QPainter, QColor, QPen, QFontDatabase, QCursor
 
@@ -261,23 +261,48 @@ class ClipboardMonitor(QApplication):
 
     def show_popup(self, data):
         """创建并显示一个新的弹窗。"""
-        for popup in self.active_popups[:]:
-            popup.slide_out()
+        existing_popups = [p for p in self.active_popups if (not hasattr(p, 'is_sliding_out') or not p.is_sliding_out)]
+
+        # 限制最大活动卡片数量
+        max_active_popups = 5
+        if len(existing_popups) >= max_active_popups:
+            oldest_popup = min(existing_popups, key=lambda p: p.creation_time)
+            oldest_popup.slide_out()
 
         new_popup = TransparentPopup(data, self, self.slide_out_mode, self.current_color_mode)
+        new_popup.creation_time = QElapsedTimer()
+        new_popup.creation_time.start()
         self.current_color_mode = 1 - self.current_color_mode
-        new_popup.raise_()
-        self.active_popups.append(new_popup)
 
+        self.active_popups.append(new_popup)
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
 
         return new_popup
 
     def close_popup(self, popup):
-        """从活动列表中移除并关闭弹窗。"""
+        """关闭指定的弹窗，确保在关闭卡片时正确处理生命周期。"""
         if popup in self.active_popups:
             self.active_popups.remove(popup)
+
+        # 停止所有可能的动画
+        try:
+            if hasattr(popup, 'slide_anim') and popup.slide_anim.state() == QPropertyAnimation.Running:
+                popup.slide_anim.stop()
+        except (RuntimeError, AttributeError):
+            # 动画对象可能已被删除，忽略错误
+            pass
+
+        try:
+            if hasattr(popup, 'anim_group') and popup.anim_group.state() == QParallelAnimationGroup.Running:
+                popup.anim_group.stop()
+        except (RuntimeError, AttributeError):
+            # 动画对象可能已被删除，忽略错误
+            pass
+
+        if hasattr(popup, 'lifecycle_timer'):
+            popup.lifecycle_timer.stop()
+
         popup.close()
 
     def __del__(self):
@@ -292,8 +317,8 @@ class TransparentPopup(QWidget):
     """
     固定大小、带虚线边框和定制布局的弹窗。
     """
-    SLIDE_IN_DURATION = 75
-    SLIDE_OUT_DURATION = 111
+    SLIDE_DURATION = 1175  # 统一滑入和滑出动画时长
+    SLIDE_OUT_POSITION_DURATION = 300  # 滑出时位置动画时长，比透明度动画快
     LIFECYCLE_SECONDS = 19
 
     def __init__(self, data, monitor, slide_out_mode=2, color_mode=0):
@@ -311,41 +336,17 @@ class TransparentPopup(QWidget):
             self.text_color = QColor(55, 45, 15)
             self.border_color = QColor(55, 45, 15)
 
-        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
-        self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
-
-        self.setFixedSize(222, 222)
+        self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool | Qt.WindowDoesNotAcceptFocus); self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating); self.setFixedSize(222, 222)
         layout = QVBoxLayout(self); layout.setContentsMargins(15, 15, 15, 15); layout.setSpacing(10)
+        font = QFont(); font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"]); font.setPointSize(11)
 
-        font_fallback_list = ["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"]
-        font = QFont()
-        font.setFamilies(font_fallback_list)
-        font.setPointSize(11)
+        self.top_content_label = QLabel(data.get("top_text")); self.top_content_label.setFont(font); self.top_content_label.setTextFormat(Qt.PlainText); self.top_content_label.setStyleSheet("color: #ffffff;" if self.color_mode == 0 else f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()}); font-weight: bold;"); self.top_content_label.setWordWrap(True); self.top_content_label.setAlignment(Qt.AlignTop | Qt.AlignLeft); self.top_content_label.setMaximumHeight(162)
 
-        self.top_content_label = QLabel(data.get("top_text")); self.top_content_label.setFont(font)
-        self.top_content_label.setTextFormat(Qt.PlainText)
-        if self.color_mode == 0:
-            self.top_content_label.setStyleSheet("color: #ffffff;")
-        else:
-            self.top_content_label.setStyleSheet(f"color: rgb({self.text_color.red()}, {self.text_color.green()}, {self.text_color.blue()}); font-weight: bold;")
-        self.top_content_label.setWordWrap(True)
-        self.top_content_label.setAlignment(Qt.AlignTop | Qt.AlignLeft); self.top_content_label.setMaximumHeight(162)
-
-        self.bottom_message_label = QLabel(data.get("bottom_text", "")); self.bottom_message_label.setFont(font)
-        if self.color_mode == 0:
-            self.bottom_message_label.setStyleSheet("color: #cd853f;")
-        else:
-            self.bottom_message_label.setStyleSheet("color: #8B4513; font-weight: bold;")
-        self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
-        self.bottom_message_label.setTextFormat(Qt.RichText)
+        self.bottom_message_label = QLabel(data.get("bottom_text", "")); self.bottom_message_label.setFont(font); self.bottom_message_label.setStyleSheet("color: #cd853f;" if self.color_mode == 0 else "color: #8B4513; font-weight: bold;"); self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft); self.bottom_message_label.setTextFormat(Qt.RichText)
 
         layout.addWidget(self.top_content_label); layout.addStretch(); layout.addWidget(self.bottom_message_label)
 
-        self.target_screen_geom = self.get_current_screen_geometry()
-        self.move_to_initial_position()
-        self.show()
-        self.slide_in()
-        self.start_lifecycle()
+        self.target_screen_geom = self.get_current_screen_geometry(); self.move_to_initial_position(); self.show(); self.slide_in(); self.start_lifecycle()
 
     def mousePressEvent(self, event):
         """当鼠标点击弹窗时，立即触发滑出动画。"""
@@ -364,32 +365,43 @@ class TransparentPopup(QWidget):
         self.lifecycle_timer.timeout.connect(self.slide_out); self.lifecycle_timer.start(self.LIFECYCLE_SECONDS * 1000)
 
     def slide_out(self):
-        """根据设定的模式执行不同的滑出动画。"""
+        """滑出动画，使用并行动画组实现边移动边消失的效果。"""
         if hasattr(self, 'lifecycle_timer'): self.lifecycle_timer.stop()
         if hasattr(self, 'is_sliding_out') and self.is_sliding_out: return
         self.is_sliding_out = True
 
+        # 停止任何正在进行的滑入动画
+        try:
+            if hasattr(self, 'slide_anim') and self.slide_anim.state() == QPropertyAnimation.Running:
+                self.slide_anim.stop()
+        except (RuntimeError, AttributeError):
+            # 动画对象可能已被删除，忽略错误
+            pass
+
         if self.slide_out_mode == 1:
             self.slide_anim = QPropertyAnimation(self, b"pos")
-            self.slide_anim.setDuration(self.SLIDE_OUT_DURATION)
+            self.slide_anim.setDuration(self.SLIDE_OUT_POSITION_DURATION)
             self.slide_anim.setStartValue(self.pos())
             self.slide_anim.setEndValue(QPoint(self.x(), self.target_screen_geom.bottom()))
             self.slide_anim.finished.connect(lambda: self.monitor.close_popup(self))
             self.slide_anim.start(QPropertyAnimation.DeleteWhenStopped)
         else:
             self.anim_group = QParallelAnimationGroup(self)
+
+            pos_anim = QPropertyAnimation(self, b"pos")
+            pos_anim.setDuration(self.SLIDE_DURATION)
+            pos_anim.setStartValue(self.pos())
+            pos_anim.setEndValue(QPoint(self.x() - 200, self.y()))
+            pos_anim.setEasingCurve(QEasingCurve.OutQuad)
+
             opacity_anim = QPropertyAnimation(self, b"windowOpacity")
-            opacity_anim.setDuration(self.SLIDE_OUT_DURATION)
+            opacity_anim.setDuration(self.SLIDE_DURATION)
             opacity_anim.setStartValue(1.0)
             opacity_anim.setEndValue(0.0)
-            opacity_anim.setEasingCurve(QEasingCurve.InQuad)
-            pos_anim = QPropertyAnimation(self, b"pos")
-            pos_anim.setDuration(self.SLIDE_OUT_DURATION)
-            pos_anim.setStartValue(self.pos())
-            pos_anim.setEndValue(QPoint(self.x() - 80, self.y()))
-            pos_anim.setEasingCurve(QEasingCurve.OutQuad)
-            self.anim_group.addAnimation(opacity_anim)
+            opacity_anim.setEasingCurve(QEasingCurve.Linear)
+
             self.anim_group.addAnimation(pos_anim)
+            self.anim_group.addAnimation(opacity_anim)
             self.anim_group.finished.connect(lambda: self.monitor.close_popup(self))
             self.anim_group.start(QAbstractAnimation.DeleteWhenStopped)
 
@@ -398,11 +410,53 @@ class TransparentPopup(QWidget):
         self.move(self.target_screen_geom.right(), self.target_screen_geom.bottom() - self.height() - 40)
 
     def slide_in(self):
-        """动画化弹窗从当前屏幕的右侧滑入。"""
-        end_pos = QPoint(self.target_screen_geom.right() - self.width() - 40, self.y())
-        self.slide_anim = QPropertyAnimation(self, b"pos"); self.slide_anim.setDuration(self.SLIDE_IN_DURATION)
-        self.slide_anim.setStartValue(self.pos()); self.slide_anim.setEndValue(end_pos)
+        """动画化弹窗从当前屏幕的右侧滑入，并检测碰撞。"""
+        # 计算目标位置，考虑现有卡片的位置
+        end_pos = self.calculate_target_position()
+
+        # 如果已经有滑入动画，先停止它
+        try:
+            if hasattr(self, 'slide_anim') and self.slide_anim.state() == QPropertyAnimation.Running:
+                self.slide_anim.stop()
+        except (RuntimeError, AttributeError):
+            # 动画对象可能已被删除，忽略错误
+            pass
+
+        self.slide_anim = QPropertyAnimation(self, b"pos");
+        self.slide_anim.setDuration(self.SLIDE_DURATION)
+        self.slide_anim.setStartValue(self.pos());
+        self.slide_anim.setEndValue(end_pos)
+
+        # 添加碰撞检测
+        self.slide_anim.valueChanged.connect(self.check_collision)
+
         self.slide_anim.start(QPropertyAnimation.DeleteWhenStopped)
+
+    def calculate_target_position(self):
+        """计算新卡片的目标位置，所有卡片都滑入到同一个固定位置。"""
+        # 所有卡片都滑入到同一个固定位置
+        return QPoint(self.target_screen_geom.right() - self.width() - 40, self.y())
+
+    def check_collision(self, current_pos):
+        """检测新卡片是否与现有卡片碰撞，如果碰撞则推动旧卡片滑出。"""
+        active_popups = [p for p in self.monitor.active_popups if p != self and (not hasattr(p, 'is_sliding_out') or not p.is_sliding_out)]
+        if not active_popups: return
+
+        rightmost_popup = max(active_popups, key=lambda p: p.x())
+        new_left = current_pos.x()
+        old_right = rightmost_popup.x() + rightmost_popup.width()
+
+        if new_left <= old_right and (not hasattr(rightmost_popup, 'is_sliding_out') or not rightmost_popup.is_sliding_out):
+            # 确保旧卡片停止任何正在进行的动画
+            try:
+                if hasattr(rightmost_popup, 'slide_anim') and rightmost_popup.slide_anim.state() == QPropertyAnimation.Running:
+                    rightmost_popup.slide_anim.stop()
+            except (RuntimeError, AttributeError):
+                # 动画对象可能已被删除，忽略错误
+                pass
+            rightmost_popup.slide_out()
+
+
 
     def update_bottom_text(self, text):
         self.bottom_message_label.setText(text)
