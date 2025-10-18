@@ -1,28 +1,27 @@
-# q3.py (v4.5.18 - AttributeError Hotfix 2)
+# q3.py (v4.5.19 - Centered Layout & Full D&D)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.18 版本特性 (基于 v4.5.17):
-- 【Bug 修复】修复 v4.5.17 中引入的 AttributeError。
-  - 错误: 'StickyTextEdit' object has no attribute 'setDragDropMode'.
-  - 原因: 再次混淆 API。setDragDropMode 是 QAbstractItemView 的方法，
-    QTextEdit 并没有这个方法。
+v4.5.19 版本特性 (基于 v4.5.18):
+- 【D&D】完全放开拖拽限制。允许内部拖拽和拖拽到外部程序。
   - 解决方案:
-    1. 移除 setDragDropMode(...) 这一行。
-    2. 仅保留 self.setAcceptDrops(True) 即可。QTextEdit 在
-       非只读模式下，默认的拖放行为就是内部移动。
-    3. 移除多余的 QAbstractScrollArea 导入。
+    1. 移除 StickyTextEdit 中多余的 mousePress/Release/MoveEvent
+       覆盖。这些是 v4.5.15 之前的临时修复，
+       现在被 setRange(0, 0) 完美替代。
+    2. 移除 self.is_dragging 变量。
+- 【Layout】修改布局为固定宽度(202px)并水平居中。
+  - 1. setContentsMargins(0, 10, 0, 10)
+  - 2. self.top_content.setFixedWidth(202)
+  - 3. self.bottom_message_label.setFixedWidth(202)
+  - 4. layout.addWidget(..., 0, Qt.AlignHCenter)
+- 【Bug 修复】
+  - 1. 修复 resizeEvent 中滚动条的定位逻辑，
+       使其基于 top_content 的几何位置，而不是窗口。
+  - 2. 简化 update_overlay_scrollbar 的高度计算。
 
-v4.5.17 版本特性:
-- 【功能恢复】恢复固定模式下，在 QTextEdit 内部拖动文字进行移动的功能。
-  - (这是一个权衡：允许拖动，但光标会变化)
-
-v4.5.16 版本特性:
-- 【Bug 修复】修复 v4.5.15 中引入的 AttributeError (setDragEnabled)。
-
-v4.5.15 版本特性:
-- 【Bug 修复】修复固定模式下拖选文本导致画布平移的问题。
+v4.5.18 版本特性:
+- 【Bug 修复】修复 v4.5.17 中引入的 AttributeError (setDragDropMode)。
 """
 import sys
 import os
@@ -31,7 +30,7 @@ import concurrent.futures
 import random
 import glob
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
-                             QTextEdit, QScrollBar) # v4.5.18: 移除了 QAbstractScrollArea
+                             QTextEdit, QScrollBar)
 from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
                           QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl,
                           QEvent, QTime, QRect)
@@ -67,15 +66,18 @@ def _get_path_size(path):
 # --- 文件大小计算函数结束 ---
 
 
-# --- MODIFIED: v4.5.18 - 移除错误的方法调用 ---
+# --- MODIFIED: v4.5.19 - 移除 D&D 限制 ---
 class StickyTextEdit(QTextEdit):
     """
+    v4.5.19:
+    - 移除了 mousePressEvent, mouseReleaseEvent, mouseMoveEvent。
+    - 这些是 v4.5.15 之前用于防止画布平移的临时修复。
+    - v4.5.15 在 activate_sticky_mode 中添加的
+      horizontalScrollBar().setRange(0, 0) 是一个更完美的修复。
+    - 移除这些覆盖后，QTextEdit 恢复了默认的 D&D 行为，
+      包括拖拽到外部应用程序。
     v4.5.18:
-    - 修复 AttributeError: 移除了 setDragDropMode(...) 这一行。
-      QTextEdit 默认行为 + setAcceptDrops(True) + setReadOnly(False)
-      已经启用了内部移动。
-    v4.5.17:
-    - 恢复内部拖放(Drag and Drop)功能。
+    - 修复 AttributeError (setDragDropMode)。
     """
     internal_copy_triggered = pyqtSignal()
 
@@ -83,14 +85,11 @@ class StickyTextEdit(QTextEdit):
         super().__init__(parent)
         self.popup = None
 
-        # v4.5.18: 允许 D&D
-        # 只需要 setAcceptDrops。QTextEdit 默认行为
-        # 在非只读模式下就是“内部移动”。
-        # v4.5.17 的 setDragDropMode 是错误的，
-        # 它是 QAbstractItemView 的方法。
+        # v4.5.18: 允许 D&D (内部移动)
         self.setAcceptDrops(True)
 
-        self.is_dragging = False
+        # v4.5.19: 移除了 self.is_dragging
+        # v4.5.19: 移除了 mousePress/Move/ReleaseEvent
 
     def insertFromMimeData(self, source):
         """
@@ -112,33 +111,10 @@ class StickyTextEdit(QTextEdit):
 
         super().keyPressEvent(event)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.is_dragging = True
-        super().mousePressEvent(event)
+    # v4.5.19: 删除了 mousePressEvent
+    # v4.5.19: 删除了 mouseReleaseEvent
+    # v4.5.19: 删除了 mouseMoveEvent
 
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.is_dragging = False
-        super().mouseReleaseEvent(event)
-
-    def mouseMoveEvent(self, event):
-        """
-        v4.5.11/v4.5.15:
-        此逻辑仍然需要，用于阻止鼠标拖出控件区域时，窗口本身移动，
-        或阻止画布平移。
-        """
-        if self.popup and self.popup.is_sticky and self.is_dragging:
-            is_inside_x_bounds = (0 <= event.pos().x() < self.rect().width())
-            if is_inside_x_bounds:
-                # 当 D&D 启用时, super() 调用将负责
-                # 1. 扩展文本选择
-                # 2. 启动 D&D (如果鼠标在选区上)
-                super().mouseMoveEvent(event)
-            else:
-                return
-        else:
-            super().mouseMoveEvent(event)
 # --- 修改结束 ---
 
 
@@ -387,35 +363,76 @@ class TransparentPopup(QWidget):
         palette.setColor(QPalette.HighlightedText, highlighted_text_color)
         self.top_content.setPalette(palette)
 
+    # --- MODIFIED: v4.5.19 - 固定宽度 202px 并居中 ---
     def setup_ui(self):
-        """v4.5.14 逻辑, 无改动"""
-        layout = QVBoxLayout(self); layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(10)
+        """v4.5.19: 修改布局为固定宽度(202px)并居中"""
+        layout = QVBoxLayout(self)
+        # v4.5.19: 左右边距设为0，保持上下边距
+        layout.setContentsMargins(0, 10, 0, 10)
+        layout.setSpacing(10)
+
         font = QFont("Consolas", 11); font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"])
+
         self.top_content = StickyTextEdit(self); self.top_content.popup = self
         self.top_content.setText(self.original_data.get("top_text"))
         self.top_content.setReadOnly(True); self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
         self.top_content.setFont(font); self.top_content.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.top_content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.top_content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.top_content.setMaximumHeight(162); self.top_content.setViewportMargins(0, 0, 0, 0)
-        self.top_content.internal_copy_triggered.connect(self.monitor.play_random_sound)
-        self.bottom_message_label = QLabel(self.original_data.get("bottom_text", "")); self.bottom_message_label.setFont(font)
-        self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft); self.bottom_message_label.setTextFormat(Qt.RichText)
-        self.bottom_message_label.installEventFilter(self)
-        layout.addWidget(self.top_content); layout.addStretch(); layout.addWidget(self.bottom_message_label)
+        self.top_content.setMaximumHeight(162)
 
+        # v4.5.19: 强制宽度为 202px
+        self.top_content.setFixedWidth(202)
+        # v4.5.19: 保持 ViewportMargins 为 0
+        self.top_content.setViewportMargins(0, 0, 0, 0)
+
+        self.top_content.internal_copy_triggered.connect(self.monitor.play_random_sound)
+
+        self.bottom_message_label = QLabel(self.original_data.get("bottom_text", ""));
+        self.bottom_message_label.setFont(font)
+        # v4.5.19: 保持文本左对齐 (控件本身会居中)
+        self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft);
+        self.bottom_message_label.setTextFormat(Qt.RichText)
+        self.bottom_message_label.installEventFilter(self)
+
+        # v4.5.19: 强制宽度为 202px 以匹配
+        self.bottom_message_label.setFixedWidth(202)
+
+        # v4.5.19: 添加控件并使其水平居中
+        layout.addWidget(self.top_content, 0, Qt.AlignHCenter)
+        layout.addStretch()
+        layout.addWidget(self.bottom_message_label, 0, Qt.AlignHCenter)
+
+    # --- MODIFIED: v4.5.19 - 更新滚动条定位逻辑 ---
     def resizeEvent(self, event):
-        """v4.5.7 逻辑, 无改动"""
+        """
+        v4.5.19: 根据 top_content 的实际几何位置来定位滚动条
+        (因为 top_content 现在是居中的)
+        """
         super().resizeEvent(event)
-        x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT; y = self.border_thickness
-        height = self.bottom_message_label.y() - self.border_thickness
+
+        # 获取 top_content 的当前几何属性 (它现在是居中的)
+        widget_geom = self.top_content.geometry()
+
+        # v4.5.19: 滚动条的 X = 控件的右边缘 - 滚动条宽度 - 边距
+        x = widget_geom.right() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
+        # v4.5.19: Y 和 Height 直接匹配控件
+        y = widget_geom.top()
+        height = widget_geom.height()
+
         self.overlay_scrollbar.setGeometry(int(x), int(y), int(self.SCROLLBAR_WIDTH), int(height))
 
+    # --- MODIFIED: v4.5.19 - 简化视口高度计算 ---
     def update_overlay_scrollbar(self):
-        """v4.5.7 逻辑, 无改动"""
+        """v4.5.19: 简化 viewport_height 的计算"""
         doc_height = self.top_content.document().size().height()
-        viewport_height = self.bottom_message_label.y() - self.border_thickness
+
+        # v4.5.19: 视口高度就是控件的当前高度
+        viewport_height = self.top_content.height()
+
         if doc_height > viewport_height:
+            # v4.5.19: 调用 resizeEvent 来正确定位滚动条
             self.resizeEvent(None)
+
             v_scrollbar = self.top_content.verticalScrollBar()
             self.overlay_scrollbar.setRange(v_scrollbar.minimum(), v_scrollbar.maximum())
             self.overlay_scrollbar.setPageStep(int(viewport_height)); v_scrollbar.setPageStep(int(viewport_height))
@@ -477,13 +494,15 @@ class TransparentPopup(QWidget):
         self.top_content.setTextInteractionFlags(Qt.TextEditorInteraction)
 
         # v4.5.15: 锁定水平滚动条，彻底阻止画布平移
-        # 这个修复在 v4.5.18 中仍然至关重要！
+        # 这个修复在 v4.5.19 中仍然至关重要！
         self.top_content.horizontalScrollBar().setRange(0, 0)
 
         self.top_content.setMaximumHeight(10000)
         self.top_content.verticalScrollBar().setValue(0)
         self.top_content.setFocus(Qt.MouseFocusReason)
 
+        # v4.5.19: 需要在 textChanged 之前调用一次
+        # 否则，如果文本没有立即溢出，滚动条不会出现
         QTimer.singleShot(0, self.update_overlay_scrollbar)
         self.top_content.textChanged.connect(self.update_overlay_scrollbar)
 
@@ -548,9 +567,7 @@ class TransparentPopup(QWidget):
         painter.drawRect(self.rect().adjusted(adj, adj, -adj, -adj))
 
 
-if __name__ == "__main__":tf-8 -*-
-"""
-一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个
+if __name__ == "__main__":
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling); QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = ClipboardMonitor(sys.argv)
     print("="*20 + " 系统可用字体家族名列表 " + "="*20)
