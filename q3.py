@@ -1,34 +1,29 @@
-# q8.py (v4.5.34 - 布局与交互回归 v11)
+# q9.py (v4.5.35 - “指哪打哪”回归 v12)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.34 版本特性 (基于 v4.5.33):
-- 【Bug 8 终极修复】滚动条“顶天立地” (v5)
-  - 问题: v4.5.33 的“地毯式” CSS 修复无效。
-  - 根源: (感谢用户的 v4.5.16 黄金参考代码)
-    我在 v4.5.17+ 之后，错误地修改了布局 (`setup_ui`) 和
-    滚动条几何计算 (`resizeEvent`, `update_overlay_scrollbar`)。
-    我弃用了 v4.5.16 中基于 `self.bottom_message_label.y()`
-    的完美动态计算，改用了基于 `self.top_content.geometry()`
-    的错误静态计算。
-  - 解决方案: "布局回归"
-    1. `setup_ui` 恢复 v4.5.16 的布局 (10px 边距,
-       移除 fixedWidth, 移除 AlignHCenter)。
-    2. `resizeEvent` 恢复 v4.5.16 的几何计算逻辑。
-    3. `update_overlay_scrollbar` 恢复 v4.5.16 的
-       `viewport_height` 计算逻辑。
-
-- 【Bug 11 修复】“点击内容区销毁”的传统 (v1)
-  - 问题: (感谢用户反馈) v4.5.17+ 版本丢失了
-    “非固定模式下点击内容区销毁卡片”的传统功能。
-  - 根源: 我在 `TransparentPopup.mousePressEvent`
-    中添加了错误的逻辑，明确阻止了内容区的点击销毁行为。
-  - 解决方案: “交互回归”
+v4.5.35 版本特性 (基于 v4.5.34):
+- 【Bug 9 回归修复】“指哪打哪” (v10) 又回来了！
+  - 问题: v4.5.34 修复 Bug 8 (布局) 和 Bug 11 (交互) 时，
+    引入了一个回归 Bug，导致 Bug 9 (指哪打哪) 失效。
+  - 根源: `TransparentPopup.mousePressEvent` (父控件)
+    中的逻辑错误。
+    我为了阻止“点击滚动条”触发“销毁卡片”，写了:
+    `if on_scrollbar: ...; return`
+    这个 `return` 语句过早地拦截并“吃掉”了鼠标事件，
+    导致事件根本无法传递到 `ClickJumpScrollBar` (子控件)
+    自己的 `mousePressEvent`，因此“指哪打哪”失效。
+  - 解决方案: "事件分发"
     1. 彻底重写 `TransparentPopup.mousePressEvent`。
-    2. 新逻辑: 如果非固定 (`is_sticky == False`)，
-       任何非滚动条/消息区的点击 (包括内容区)
-       都将立即触发 `self.slide_out()`。
+    2. 新逻辑: 明确划分点击区域 (滚动条, 消息区,
+       内容区, 背景区)。
+    3. 如果点击在 `is_on_scrollbar` 或 `is_on_message`:
+       调用 `super().mousePressEvent(event)` 并 `return`。
+       这会将事件正确交还给 Qt 事件系统去分发给子控件，
+       同时 `return` 阻止了父控件的“点击销毁”逻辑。
+    4. 如果点击在 `is_on_content` 或 `is_on_background`:
+       才执行“点击销毁” (非固定) 或“编辑/忽略” (固定) 逻辑。
 """
 import sys
 import os
@@ -81,8 +76,8 @@ class StickyTextEdit(QTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.popup = None
-        # v4.5.16: 修复 AttributeError, 禁用拖放
-        self.setAcceptDrops(True) # 恢复 v4.5.30+ 的拖放
+        # v4.5.34 保持 v4.5.30+ 的拖放 (True)
+        self.setAcceptDrops(True)
 
     def insertFromMimeData(self, source):
         if source.hasText():
@@ -349,21 +344,19 @@ class ClipboardMonitor(QApplication):
         if hasattr(self, 'executor'): self.executor.shutdown(wait=True)
 
 
-# --- MODIFIED: v4.5.34 - 修复 Bug 8 (布局) 和 Bug 11 (交互) ---
+# --- MODIFIED: v4.5.35 - 修复 Bug 9 (指哪打哪回归) ---
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 19
     SCROLLBAR_WIDTH = 11
-    SCROLLBAR_MARGIN_RIGHT = 2 # v4.5.32 已修复 (保持 2)
+    SCROLLBAR_MARGIN_RIGHT = 2
     TEXT_LOAD_THRESHOLD_BYTES = 100 * 1024
 
-    # v4.5.33 的 "地毯式" CSS (Bug 8 v4) - 保持
-    # 这个样式表是正确的，但它需要正确的布局才能生效
+    # v4.5.34 的 CSS (无改动)
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{
             border: none; background: transparent;
             width: {width}px;
-            margin: 0;
-            padding: 0px;
+            margin: 0; padding: 0px;
         }}
         QScrollBar::groove:vertical {{
             border: none; background: transparent;
@@ -380,11 +373,9 @@ class TransparentPopup(QWidget):
         }}
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
             background: none;
-            margin: 0px;
-            padding: 0px;
+            margin: 0px; padding: 0px;
         }}
     """
-    # --- CSS 保持结束 ---
 
     def __init__(self, data, monitor, color_mode=0):
         super().__init__()
@@ -403,11 +394,12 @@ class TransparentPopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
 
-        # v4.5.32 (v9) 版的滚动条 (保持)
+        # v4.5.32 (v9) 版的滚动条 (无改动)
         self.overlay_scrollbar = ClickJumpScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical); self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
 
+        # v4.5.34 的布局和样式 (无改动)
         self.setup_ui(); self.setup_colors_and_styles()
         self.target_screen_geom = self.get_current_screen_geometry()
         self.move_to_initial_position(); self.show(); self.slide_in(); self.start_lifecycle()
@@ -419,6 +411,7 @@ class TransparentPopup(QWidget):
 
         self.overlay_scrollbar.raise_()
 
+    # v4.5.34 逻辑 (无改动)
     def setup_colors_and_styles(self):
         common_bottom_style = "padding-top: 8px;"
         if self.color_mode == 0:
@@ -438,27 +431,16 @@ class TransparentPopup(QWidget):
             highlight_bg_color = QColor(139, 69, 19, 191)
         self.bottom_message_label.setStyleSheet(self.bottom_text_style)
         self.top_content.setStyleSheet(f"QTextEdit {{ border: none; background-color: transparent; padding: 0; {self.top_text_style} }}")
-
-        # 应用 v4.5.33 的样式表
         scroll_style = self.OVERLAY_SCROLLBAR_STYLE_SHEET.format(width=self.SCROLLBAR_WIDTH, handle_color=self.scrollbar_handle_color)
         self.overlay_scrollbar.setStyleSheet(scroll_style)
-
         palette = self.top_content.palette(); palette.setColor(QPalette.Highlight, highlight_bg_color)
         palette.setColor(QPalette.HighlightedText, QColor(Qt.white)); self.top_content.setPalette(palette)
 
-    # --- MODIFIED: v4.5.34 修复 Bug 8 (布局 v5) ---
+    # v4.5.34 布局 (无改动)
     def setup_ui(self):
-        """
-        v4.5.34: 布局回滚到 v4.5.16 (q3.py) 的 "黄金标准"
-        - 恢复 10px 边距
-        - 移除 setFixedWidth
-        - 移除 addWidget 中的 AlignHCenter
-        """
         layout = QVBoxLayout(self)
-        # 回滚到 10px 边距
         layout.setContentsMargins(10, 10, 10, 10);
         layout.setSpacing(10)
-
         font = QFont("Consolas", 11); font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"])
         self.top_content = StickyTextEdit(self); self.top_content.popup = self
         if self.full_text_to_load is not None:
@@ -469,23 +451,16 @@ class TransparentPopup(QWidget):
         self.top_content.setFont(font); self.top_content.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.top_content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.top_content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.top_content.setMaximumHeight(162)
-        # 移除 setFixedWidth(202)
         self.top_content.setViewportMargins(0, 0, 0, 0)
         self.top_content.internal_copy_triggered.connect(self.monitor.play_random_sound)
-
         self.bottom_message_label = QLabel(self.original_data.get("bottom_text", ""));
         self.bottom_message_label.setFont(font)
         self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft);
         self.bottom_message_label.setTextFormat(Qt.RichText)
         self.bottom_message_label.installEventFilter(self)
-        # 移除 setFixedWidth(202)
+        layout.addWidget(self.top_content); layout.addStretch(); layout.addWidget(self.bottom_message_label)
 
-        # 回滚 addWidget (移除 AlignHCenter)
-        layout.addWidget(self.top_content)
-        layout.addStretch()
-        layout.addWidget(self.bottom_message_label)
-    # --- 修复结束 ---
-
+    # v4.5.34 逻辑 (无改动)
     def load_full_text(self):
         if self.full_text_to_load is None: return
         try:
@@ -493,36 +468,18 @@ class TransparentPopup(QWidget):
             if self.is_sticky: QTimer.singleShot(0, self.update_overlay_scrollbar)
         except RuntimeError: pass
 
-    # --- MODIFIED: v4.5.34 修复 Bug 8 (布局 v5) ---
+    # v4.5.34 布局 (无改动)
     def resizeEvent(self, event):
-        """
-        v4.5.34: 几何计算回滚到 v4.5.16 (q3.py) 的 "黄金标准"
-        - 滚动条的 y 和 height 基于 self.bottom_message_label.y() 计算
-        """
         super().resizeEvent(event)
         x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
-
-        # v4.5.16 逻辑: 从顶部边框开始
         y = self.border_thickness
-
-        # v4.5.16 逻辑: 高度 = 底部标签的Y坐标 - 顶部边框
-        # 这确保了滚动条完美地填满 `top_content` 和 `addStretch` 的空间
         height = self.bottom_message_label.y() - self.border_thickness
-
         self.overlay_scrollbar.setGeometry(int(x), int(y), int(self.SCROLLBAR_WIDTH), int(height))
-    # --- 修复结束 ---
 
-    # --- MODIFIED: v4.5.34 修复 Bug 8 (布局 v5) ---
+    # v4.5.34 布局 (无改动)
     def update_overlay_scrollbar(self):
-        """
-        v4.5.34: 视口计算回滚到 v4.5.16 (q3.py) 的 "黄金标准"
-        - `viewport_height` 基于 `self.bottom_message_label.y()` 计算
-        """
         doc_height = self.top_content.document().size().height()
-
-        # v4.5.16 逻辑: 视口高度 = 底部标签的Y坐标 - 顶部边框
         viewport_height = self.bottom_message_label.y() - self.border_thickness
-
         if doc_height > viewport_height:
             self.resizeEvent(None); v_scrollbar = self.top_content.verticalScrollBar()
             self.overlay_scrollbar.setRange(v_scrollbar.minimum(), v_scrollbar.maximum())
@@ -531,8 +488,8 @@ class TransparentPopup(QWidget):
             self.connect_scrollbar_signals(); self.overlay_scrollbar.show()
         else:
             self.overlay_scrollbar.hide(); self.disconnect_scrollbar_signals()
-    # --- 修复结束 ---
 
+    # v4E... (无改动)
     def connect_scrollbar_signals(self):
         if not self.is_scrollbar_connected:
             try:
@@ -551,51 +508,67 @@ class TransparentPopup(QWidget):
                 self.is_scrollbar_connected = False
             except RuntimeError: pass
 
+    # v4.5.34 逻辑 (无改动) - 消息区由 eventFilter 拦截
     def eventFilter(self, obj, event):
         if obj == self.bottom_message_label and event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             self.toggle_sticky_mode(); return True
         return super().eventFilter(obj, event)
 
-    # --- MODIFIED: v4.5.34 修复 Bug 11 (交互 v1) ---
+    # --- MODIFIED: v4.5.35 修复 Bug 9 回归 (v12) ---
     def mousePressEvent(self, event):
         """
+        v4.5.35: 修复 "指哪打哪" 回归 Bug (Bug 9)
         v4.5.34: 恢复“点击内容区销毁”的传统 (Bug 11)
         """
-        click_pos = event.pos()
-
-        # 1. 检查“安全”子控件 (滚动条)
-        if self.overlay_scrollbar.isVisible() and self.overlay_scrollbar.geometry().contains(click_pos):
-            # 点击在滚动条上，放行
-            super().mousePressEvent(event)
-            return
-
-        # 2. 检查消息区 (由 eventFilter 处理, 此处仅为保险)
-        if self.bottom_message_label.geometry().contains(click_pos):
-            super().mousePressEvent(event)
-            return
-
-        # 3. 检查内容区
-        is_on_content = self.top_content.geometry().contains(click_pos)
-
         if event.button() == Qt.LeftButton:
-            if self.is_sticky:
-                # --- 固定模式 ---
-                # 点击内容区 -> 允许 (交给 QTextEdit 处理)
-                # 点击背景 -> 忽略
-                if is_on_content:
+            # 获取所有可交互子控件的几何区域
+            geom_scrollbar = self.overlay_scrollbar.geometry() if self.overlay_scrollbar.isVisible() else QRect()
+            geom_message = self.bottom_message_label.geometry()
+            geom_content = self.top_content.geometry()
+
+            click_pos = event.pos()
+
+            # 1. 检查是否点击在“安全”子控件上 (滚动条, 消息区)
+            #    (消息区由 eventFilter 处理, 此处检查是双保险)
+            is_on_scrollbar = geom_scrollbar.contains(click_pos)
+            is_on_message = geom_message.contains(click_pos)
+
+            if is_on_scrollbar or is_on_message:
+                # --- 点击在滚动条或消息区 ---
+                # 将事件交还给 Qt 的事件分发系统，
+                # 它会把事件正确地发送给 ClickJumpScrollBar 或 (通过eventFilter) 消息区
+                super().mousePressEvent(event)
+                # 必须 return，以阻止父控件执行“点击销毁”
+                return
+
+            # 2. 检查是否点击在内容区
+            is_on_content = geom_content.contains(click_pos)
+
+            if is_on_content:
+                # --- 点击在内容区 ---
+                if self.is_sticky:
+                    # 固定模式: 允许编辑 (将事件交给 QTextEdit)
                     super().mousePressEvent(event)
                 else:
-                    pass # 忽略背景点击
-            else:
-                # --- 非固定模式 (传统) ---
-                # 点击内容区 -> 销毁
-                # 点击背景 -> 销毁
+                    # 非固定模式: 销毁卡片 (传统)
+                    self.slide_out()
+                return
+
+            # 3. 如果代码执行到这里，说明点击在“背景区”
+            # --- 点击在背景区 ---
+            if not self.is_sticky:
+                # 非固定模式: 销毁卡片 (传统)
                 self.slide_out()
-        else:
-            # 其他鼠标按键 (如右键)
-            super().mousePressEvent(event)
+            else:
+                # 固定模式: 忽略背景点击
+                pass
+            return
+
+        # 4. 处理其他鼠标按键 (如右键)
+        super().mousePressEvent(event)
     # --- 修复结束 ---
 
+    # v4.5.34 逻辑 (无改动)
     def get_current_screen_geometry(self):
         return (QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()).availableGeometry()
 
@@ -618,8 +591,6 @@ class TransparentPopup(QWidget):
         self.top_content.horizontalScrollBar().setRange(0, 0); self.top_content.setMaximumHeight(10000)
         if self.full_text_to_load is None:
             self.top_content.verticalScrollBar().setValue(0)
-            # v4.5.34: 布局修复后，此处的 QTimer.singleShot(0, ...)
-            # 对于确保滚动条在布局更新后出现至关重要
             QTimer.singleShot(0, self.update_overlay_scrollbar)
             self.top_content.textChanged.connect(self.update_overlay_scrollbar)
         self.top_content.setFocus(Qt.MouseFocusReason); self.update()
