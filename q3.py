@@ -1,20 +1,23 @@
-# q3.py (v4.5.15 - Panning & Cursor Fix)
+# q3.py (v4.5.16 - AttributeError Hotfix)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.15 版本特性 (基于 v4.5.14):
+v4.5.16 版本特性 (基于 v4.5.15):
+- 【Bug 修复】修复 v4.5.15 中引入的 AttributeError。
+  - 错误: 'StickyTextEdit' object has no attribute 'setDragEnabled'.
+  - 原因: 错误地调用了 setDragEnabled (这是 QAbstractItemView 的方法)。
+  - 解决方案: 对 QTextEdit 应使用 self.setAcceptDrops(False)
+    来禁用拖放功能，这同样能修复光标变化问题。
+
+v4.5.15 版本特性:
 - 【Bug 修复】修复固定模式下拖选文本导致画布平移的问题:
   - 在 v4.5.14 启用 Qt.TextEditorInteraction 后，QTextEdit 默认的
     “边缘滚动”行为被激活，导致了平移 Bug 回归。
   - 解决方案: 在 activate_sticky_mode 中，强制将水平滚动条的范围
     设置为 (0, 0)，即 self.top_content.horizontalScrollBar().setRange(0, 0)。
-    这从根本上禁用了水平滚动能力，从而杜绝了平移。
 - 【UX 修复】拖选文本时光标变回系统默认样式的问题:
-  - 原因: QTextEdit 在可编辑模式下默认启用“文本拖放”(Drag and Drop)。
-  - 解决方案: 在 StickyTextEdit 的 __init__ 方法中，
-    调用 self.setDragEnabled(False) 来禁用此功能。
-    这样在拖拽选择时，光标会一直保持为文本选择光标 (I-beam)。
+  - 解决方案: 在 StickyTextEdit 的 __init__ 方法中禁用拖放功能。
 """
 import sys
 import os
@@ -46,7 +49,7 @@ def _get_path_size(path):
                                 total_size += entry.stat(follow_symlinks=False).st_size
                             elif entry.is_dir(follow_symlinks=False):
                                 total_size += _get_path_size(entry.path)
-                        except (OSError, PermissionError):
+                        except (OSEError, PermissionError):
                             continue
             except (OSError, PermissionError):
                 pass
@@ -58,15 +61,15 @@ def _get_path_size(path):
 # --- 文件大小计算函数结束 ---
 
 
-# --- MODIFIED: v4.5.15 - 禁用拖放功能 ---
+# --- MODIFIED: v4.5.16 - 修复 AttributeError ---
 class StickyTextEdit(QTextEdit):
     """
+    v4.5.16:
+    - 修复: 使用 setAcceptDrops(False) 替代 setDragEnabled(False)。
     v4.5.15:
     - 禁用拖放 (Drag and Drop) 来修复光标变化问题。
     v4.5.14:
     - 增加 insertFromMimeData 覆盖，强制只粘贴纯文本。
-    v4.5.11:
-    - 使用“事件门控”逻辑修复拖拽选择时画布平移(panning)的 BUG。
     """
     internal_copy_triggered = pyqtSignal()
 
@@ -74,8 +77,9 @@ class StickyTextEdit(QTextEdit):
         super().__init__(parent)
         self.popup = None
 
-        # v4.5.15: 禁用文本拖放功能，防止拖拽时改变光标
-        self.setDragEnabled(False)
+        # v4.5.16: 修复 AttributeError
+        # 禁用拖放功能，防止拖拽时改变光标
+        self.setAcceptDrops(False)
 
         self.is_dragging = False
 
@@ -90,9 +94,7 @@ class StickyTextEdit(QTextEdit):
 
     def keyPressEvent(self, event):
         """
-        v4.5.13 的逻辑已足够健壮:
-        - setReadOnly(True/False) 会自动处理是否允许编辑。
-        - 我们只需额外处理 Ctrl+C 的音效触发。
+        v4.5.13 的逻辑已足够健壮
         """
         if event.matches(QKeySequence.Copy):
             if self.popup and self.popup.is_sticky and self.textCursor().hasSelection():
@@ -115,7 +117,6 @@ class StickyTextEdit(QTextEdit):
         """
         v4.5.11: 核心修复 - 事件门控
         v4.5.15: 此逻辑仍然需要，用于阻止鼠标拖出控件区域时，窗口本身移动
-        (虽然平移问题已通过锁定滚动条解决，但这层防御依然有价值)。
         """
         if self.popup and self.popup.is_sticky and self.is_dragging:
             is_inside_x_bounds = (0 <= event.pos().x() < self.rect().width())
@@ -451,7 +452,7 @@ class TransparentPopup(QWidget):
         if self.is_sticky: self.activate_sticky_mode()
         else: self.deactivate_sticky_mode()
 
-    # --- MODIFIED: v4.5.15 - 锁定水平滚动 ---
+    # --- v4.5.15 逻辑, 无改动 ---
     def activate_sticky_mode(self):
         if self.lifecycle_timer.isActive():
             self.lifecycle_timer.stop()
