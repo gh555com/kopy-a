@@ -1,33 +1,36 @@
-# q3.py (v4.5.29 - 滚动条堆叠顺序修复 v6)
+# q4.py (v4.5.30 - 文本条件加载 + 滚动条精准跳转 v7)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.29 版本特性 (基于 v4.5.28):
-- 【Bug 5 修复】滚动条 Bug 最终修复 (v6) - 堆叠顺序 (Z-order)
-  - 问题: 经用户 v4.5.28 测试，滚动条滑块依然无法选中。
-  - 根源: 在 __init__ 中，self.top_content (文本框) 在
-    self.overlay_scrollbar (滚动条) 之后创建，导致
-    文本框透明地覆盖在滚动条之上，拦截了所有本应
-    属于滚动条的点击事件。
-  - 解决方案: 在 __init__ 方法末尾，调用
-    `self.overlay_scrollbar.raise_()`，
-    将其提升到子控件堆叠顺序的最顶层，确保它能
-    正确接收鼠标事件。
-  - (同时为 v4.5.22 的文本异步加载逻辑错误道歉)
+v4.5.30 版本特性 (基于 v4.5.29):
+- 【Bug 6 修复】文本加载优化 (v1) - 感谢用户的绝妙建议
+  - 问题: v4.5.22 的 QTimer 延迟加载，解决了大文本的卡顿，
+    但也导致了小文本（如 "Hello"）会先显示 "●" 再显示 "Hello"，
+    降低了小文本的感知效能。
+  - 根源: 对所有文本“一刀切”地使用延迟加载。
+  - 解决方案: "条件加载"
+    1. 在 `process_clipboard_data` 中，将 `byte_size` 存入
+       返回的 data 字典。
+    2. 在 `TransparentPopup` 中，设置一个阈值
+       (TEXT_LOAD_THRESHOLD_BYTES = 100KB)。
+    3. 如果 `byte_size < 100KB`，则在 `setup_ui` 中立即
+       加载文本 (v4.5.21 的完美体验)。
+    4. 如果 `byte_size >= 100KB`，才使用 QTimer 延迟
+       加载 (v4.5.22 的高响应体验)。
+    - 这结合了两个版本的优点，解决了效能权衡问题。
 
-v4.5.28 版本特性:
-- 【Bug 4 修复】滚动条点击事件拦截修复 (v5)
-  - 重写了 TransparentPopup.mousePressEvent，
-    确保点击子控件时事件能正确传递。(此逻辑正确)
-
-v4.5.27 版本特性:
-- 【Bug 3 修复】音效逻辑修复 (v3)。
-  - 任何变更（包括清空）都触发音效。(此逻辑正确)
-
-v4.5.26 版本特性:
-- 【Bug 1 修复】滚动条(ClickJumpScrollBar)的逻辑(v4)。
-  - 采用 mouseReleaseEvent。(此逻辑正确)
+- 【Bug 7 修复】滚动条 Bug 最终修复 (v7) - “指哪打哪”
+  - 问题: v4.5.29 修复了滚动条的“点击不到”问题，但用户
+    反馈 v4.5.26 的跳转逻辑“点击不准”，不能“指哪打哪”。
+  - 根源: v4.5.26 的逻辑试图将“滑块中心”对齐到“点击点”
+    (这是 QSlider 的逻辑)，而不是按比例跳转。
+  - 解决方案: 在 `ClickJumpScrollBar.mouseReleaseEvent` 中，
+    重写计算逻辑。
+    1. 获取轨道(Groove)的矩形 `track_rect`。
+    2. 计算点击位置在轨道内的相对比例 (例如 70%)。
+    3. `new_value = minimum + ratio * (maximum - minimum)`。
+    - 这实现了精准的“按比例跳转”。
 """
 import sys
 import os
@@ -72,7 +75,7 @@ def _get_path_size(path):
 # --- 文件大小计算函数结束 ---
 
 
-# --- v4.5.19: 一个干净的 QTextEdit 子类 ---
+# --- v4.5.19 (无改动): 一个干净的 QTextEdit 子类 ---
 class StickyTextEdit(QTextEdit):
     internal_copy_triggered = pyqtSignal()
 
@@ -96,108 +99,93 @@ class StickyTextEdit(QTextEdit):
         super().keyPressEvent(event)
 
 
-# --- v4.5.26 (无改动): 滚动条 Bug 最终修复 (v4) ---
-# 这个类本身是正确的，问题出在 v4.5.27/28 的 TransparentPopup
+# --- MODIFIED: v4.5.30 - 滚动条精准跳转 (v7) ---
 class ClickJumpScrollBar(QScrollBar):
     """
-    v4.5.26: 滚动条 Bug 最终修复 (v4) - 全新思路
+    v4.5.30: 滚动条 Bug 最终修复 (v7) - “指哪打哪”
 
-    之前所有 v4.5.23-25 的修复都失败了，因为它们都试图在
-    mousePressEvent 中进行拦截，这破坏了 Qt 的原生拖动事件链。
+    v4.5.26 (v4) 的逻辑：能点击，但“点击不准”。
+    v4.5.30 (v7) 的逻辑：重写计算方法，实现“按比例精准跳转”。
 
-    新逻辑:
-    1. __init__: 初始化两个状态变量 self.press_pos 和 self.press_value。
-    2. mousePressEvent:
-       - 不做任何检测！
-       - 只记录按下的位置和值。
-       - 立即、无条件地调用 super()，让原生拖动逻辑 100% 正常启动。
-    3. mouseReleaseEvent:
-       - 这才是我们实现自定义逻辑的地方。
-       - 首先调用 super()。
-       - 检查：这次操作是不是一个“单纯的单击”？
-         (通过比较按下和释放的位置/值)
-       - 如果是“单击”：
-         - 我们才在这里执行 v4.5.25 的“手动矩形检测”逻辑。
-         - 如果单击在轨道空白处，执行跳转。
-       - 如果是“拖动”：
-         - 我们什么都不做，原生拖动已经处理完毕。
+    mousePressEvent 和 mouseReleaseEvent 的“单击/拖动”
+    检测逻辑 (v4.5.26) 保持不变，因为它是健壮的。
+
+    只修改 mouseReleaseEvent 中第 4 步的计算逻辑。
     """
     def __init__(self, parent=None):
         super().__init__(parent)
-        # 用来跟踪点击，以区分“单击”和“拖动”
         self.press_pos = QPoint()
         self.press_value = 0
 
     def mousePressEvent(self, event):
-        # 1. 只记录状态
+        # 1. 只记录状态 (v4.5.26 逻辑，保持不变)
         if event.button() == Qt.LeftButton:
             self.press_pos = event.pos()
             self.press_value = self.value()
 
-        # 2. 立即、无条件地交给父类处理
-        #    这保证了原生的拖动、箭头点击等功能 100% 不受干扰。
+        # 2. 立即、无条件地交给父类处理 (v4.5.26 逻辑，保持不变)
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
-        # 1. 立即交给父类处理 (这会处理拖动结束等)
+        # 1. 立即交给父类处理 (v4.5.26 逻辑，保持不变)
         super().mouseReleaseEvent(event)
 
         if event.button() != Qt.LeftButton:
             return
 
-        # 2. 检查这是不是一个“单纯的单击”
-
-        # a) 检查鼠标是否在按下后发生了拖动
-        # QApplication.startDragDistance() 通常是一个小值，如 4 像素
-        # (event.pos() - self.press_pos).manhattanLength() 计算了 x 和 y 的总位移
+        # 2. 检查这是不是一个“单纯的单击” (v4.5.26 逻辑，保持不变)
         moved = (event.pos() - self.press_pos).manhattanLength() > QApplication.startDragDistance()
-
-        # b) 检查值是否被原生拖动改变了
-        # (注意：super().mouseReleaseEvent 已经执行，所以 self.value() 是最新值)
         value_changed = (self.value() != self.press_value)
 
-        # 如果鼠标移动了，或者值被改变了，说明这是一个拖动操作，我们什么都不做。
         if moved or value_changed:
-            self.press_pos = QPoint() # 重置
+            self.press_pos = QPoint()
             return
 
-        # 3. 如果代码执行到这里，说明这是一个“单击”
-        #    现在我们可以安全地执行“点击跳转”逻辑
-
+        # 3. 如果代码执行到这里，说明这是一个“单击” (v4.5.26 逻辑，保持不变)
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
 
-        # 使用 v4.5.25 的可靠方法：手动获取矩形
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
         add_line_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarAddLine, self)
         sub_line_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSubLine, self)
 
-        # 检查“单击”是否发生在滑块或箭头上
-        # (我们使用 self.press_pos，因为这是单击开始的地方)
         if handle_rect.contains(self.press_pos) or \
            add_line_rect.contains(self.press_pos) or \
            sub_line_rect.contains(self.press_pos):
-            # 单击在滑块或箭头上，原生 super() 已经处理了，我们不做任何事
-            return
+            return # 单击在滑块或箭头上
 
         # 4. 如果代码执行到这里，说明这是在“轨道空白处”的“单击”
 
-        if handle_rect.isNull():
-             handle_rect = QRect(0, 0, 0, 0)
+        # --- MODIFIED: v4.5.30 修复 Bug 7 (滚动条“指哪打哪”) ---
+
+        # 获取轨道 (groove) 的矩形，这是我们计算比例的基准
+        track_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarGroove, self)
+
+        if not track_rect.isValid() or track_rect.isEmpty():
+            return # 没有有效的轨道
 
         if self.orientation() == Qt.Vertical:
-            available_space = self.height() - handle_rect.height()
-            click_pos_val = self.press_pos.y() - handle_rect.height() / 2
-        else:
-            available_space = self.width() - handle_rect.width()
-            click_pos_val = self.press_pos.x() - handle_rect.width() / 2
+            if track_rect.height() == 0: return
+            # 点击位置 Y 相对于轨道顶部的距离
+            relative_y = self.press_pos.y() - track_rect.top()
+            # 点击位置 Y 占轨道总高度的比例
+            ratio = relative_y / track_rect.height()
+        else: # 水平方向
+            if track_rect.width() == 0: return
+            # 点击位置 X 相对于轨道左侧的距离
+            relative_x = self.press_pos.x() - track_rect.left()
+            # 点击位置 X 占轨道总宽度的比例
+            ratio = relative_x / track_rect.width()
 
-        if available_space > 0:
-            ratio = max(0.0, min(1.0, click_pos_val / available_space))
-            new_value = self.minimum() + ratio * (self.maximum() - self.minimum())
-            self.setValue(int(new_value))
+        # 钳制比例在 0.0 到 1.0
+        ratio = max(0.0, min(1.0, ratio))
 
-        # 重置
+        # 根据比例计算新的 value
+        new_value = self.minimum() + ratio * (self.maximum() - self.minimum())
+        self.setValue(int(new_value))
+        # --- 修复结束 ---
+
+        # 重置 (v4.5.26 逻辑，保持不变)
         self.press_pos = QPoint()
 
 
@@ -259,6 +247,7 @@ class ClipboardMonitor(QApplication):
     def setup_clipboard_monitor(self):
         self.clipboard().dataChanged.connect(self.on_clipboard_changed)
 
+    # --- MODIFIED: v4.5.30 - 传递 byte_size ---
     def process_clipboard_data(self, mime_data):
         all_formats = mime_data.formats()
         if mime_data.hasUrls():
@@ -293,7 +282,15 @@ class ClipboardMonitor(QApplication):
             if text:
                 try: byte_size = len(text.encode('gbk'))
                 except UnicodeEncodeError: byte_size = len(text.encode('utf-8', 'replace'))
-                return {"type": "text", "top_text": text, "bottom_text": f"{self.format_size(byte_size)}"}
+
+                # --- MODIFIED: v4.5.30 修复 Bug 6 ---
+                # 将 byte_size 传递给 TransparentPopup 以进行条件加载
+                return {"type": "text",
+                        "top_text": text,
+                        "bottom_text": f"{self.format_size(byte_size)}",
+                        "byte_size": byte_size} # <-- 新增
+                # --- 修复结束 ---
+
         if all_formats:
             filtered_formats = [f for f in all_formats if not f.startswith('application/x-qt-') and f not in ('text/plain', 'text/uri-list')]
             primary_type = filtered_formats[0] if filtered_formats else all_formats[0]
@@ -332,16 +329,11 @@ class ClipboardMonitor(QApplication):
         data = self.process_clipboard_data(mime_data)
         if not data: return
 
-        # --- v4.5.27 修复 Bug 3 (音效逻辑) ---
-        # 遵照指示：任何剪贴板变更（包括清空）都必须触发音效。
-        # 1. 无条件播放声音
         self.play_random_sound()
 
-        # 2. 然后再检查 sticky 状态
         if any(p.is_sticky for p in self.active_popups):
             self.set_cooldown()
-            return # 阻止新 UI 弹窗，但声音已播放
-        # --- 修复结束 ---
+            return
 
         stationary_popup = next((p for p in reversed(self.active_popups) if not (hasattr(p, 'is_sliding_out') and p.is_sliding_out)), None)
         if stationary_popup and not stationary_popup.is_sticky:
@@ -380,9 +372,14 @@ class ClipboardMonitor(QApplication):
         if hasattr(self, 'executor'): self.executor.shutdown(wait=True)
 
 
+# --- MODIFIED: v4.5.30 - 文本条件加载 ---
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 19
     SCROLLBAR_WIDTH, SCROLLBAR_MARGIN_RIGHT = 11, 2
+
+    # --- v4.5.30 修复 Bug 6 ---
+    # 设置一个阈值，例如 100 KB
+    TEXT_LOAD_THRESHOLD_BYTES = 100 * 1024
 
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{ border: none; background: transparent; width: {width}px; margin: 0; }}
@@ -399,21 +396,31 @@ class TransparentPopup(QWidget):
 
         self.full_text_to_load = None
         self.text_load_timer = None
+
+        # --- MODIFIED: v4.5.30 修复 Bug 6 (文本条件加载) ---
         if self.original_data.get("type") == "text":
-            self.full_text_to_load = self.original_data.get("top_text", "")
+            text_size = self.original_data.get("byte_size", 0)
+
+            # 只有当文本大于阈值时，才启用延迟加载
+            if text_size >= self.TEXT_LOAD_THRESHOLD_BYTES:
+                self.full_text_to_load = self.original_data.get("top_text", "")
+            else:
+                # 小文本：self.full_text_to_load 保持为 None
+                # setup_ui 将会立即加载它
+                pass
+        # --- 修复结束 ---
 
         self.border_animation_timer = QTimer(self); self.border_animation_timer.timeout.connect(self.animate_border)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
 
-        # v4.5.26: 使用最终修复版 v4 的滚动条
-        # (v4.5.29 修复) 必须先创建它，才能在 setup_ui 之后 .raise_()
+        # v4.5.30: 使用 v7 版的滚动条
         self.overlay_scrollbar = ClickJumpScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical); self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
 
-        self.setup_ui()
+        self.setup_ui() # setup_ui 现在会根据 self.full_text_to_load 的状态来决定如何加载
         self.setup_colors_and_styles()
 
         self.target_screen_geom = self.get_current_screen_geometry()
@@ -422,21 +429,15 @@ class TransparentPopup(QWidget):
         self.slide_in()
         self.start_lifecycle()
 
+        # 仅当 self.full_text_to_load 不是 None (即大文本) 时，才启动定时器
         if self.full_text_to_load is not None:
             self.text_load_timer = QTimer(self)
             self.text_load_timer.setSingleShot(True)
             self.text_load_timer.timeout.connect(self.load_full_text)
             self.text_load_timer.start(self.SLIDE_IN_DURATION + 10)
 
-        # --- MODIFIED: v4.5.29 - 修复滚动条堆叠顺序 Bug ---
-        # 文本框(top_content)是在滚动条(overlay_scrollbar)之后
-        # 创建的(在 setup_ui 中)，所以它会覆盖在滚动条之上，
-        # 导致滚动条无法被点击。
-        #
-        # .raise_() 会将滚动条提升到子控件堆叠顺序的最顶层，
-        # 确保它能接收到鼠标事件。
+        # v4.5.29 (无改动): 堆叠顺序修复，必须保留
         self.overlay_scrollbar.raise_()
-        # --- 修复结束 ---
 
     def setup_colors_and_styles(self):
         common_bottom_style = "padding-top: 8px;"
@@ -464,6 +465,7 @@ class TransparentPopup(QWidget):
         palette.setColor(QPalette.HighlightedText, QColor(Qt.white))
         self.top_content.setPalette(palette)
 
+    # --- MODIFIED: v4.5.30 - 文本条件加载 ---
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 10, 0, 10); layout.setSpacing(10)
@@ -471,11 +473,15 @@ class TransparentPopup(QWidget):
 
         self.top_content = StickyTextEdit(self); self.top_content.popup = self
 
-        # v4.5.22 文本异步加载逻辑：先显示占位符
+        # --- MODIFIED: v4.5.30 修复 Bug 6 ---
+        # 检查 self.full_text_to_load 是否在 __init__ 中被设置
         if self.full_text_to_load is not None:
+            # 是大文本：显示占位符 "●"
             self.top_content.setText("●")
         else:
+            # 是小文本 (或非文本)：立即加载真实内容
             self.top_content.setText(self.original_data.get("top_text"))
+        # --- 修复结束 ---
 
         self.top_content.setReadOnly(True); self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
         self.top_content.setFont(font); self.top_content.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
@@ -496,7 +502,8 @@ class TransparentPopup(QWidget):
         layout.addStretch()
         layout.addWidget(self.bottom_message_label, 0, Qt.AlignHCenter)
 
-    # v4.5.22 文本异步加载逻辑
+    # v4.5.22 文本异步加载逻辑 (无改动)
+    # (这个函数现在只会在 __init__ 判定为大文本时才会被调用)
     def load_full_text(self):
         if self.full_text_to_load is None: return
 
@@ -554,56 +561,28 @@ class TransparentPopup(QWidget):
         return super().eventFilter(obj, event)
 
     # --- v4.5.28 (无改动): 修复滚动条点击拦截 Bug ---
-    # 这个逻辑本身是正确的，它依赖 v4.5.29 的堆叠顺序修复
+    # 这个逻辑是正确的，它依赖 v4.5.29 的堆叠顺序修复
+    # 和 v4.5.30 的滚动条逻辑修复
     def mousePressEvent(self, event):
-        """
-        v4.5.28: 修复了 v4.5.27 中导致滚动条无法点击的灾难性 Bug。
-
-        问题:
-        v4.5.27 的 mousePressEvent 会拦截所有点击，
-        当 if 条件不满足时 (例如在 sticky 模式下，或右键点击)，
-        它没有调用 super()，导致事件被“吃掉”，永远无法
-        传递到子控件 (如 ClickJumpScrollBar)。
-
-        新逻辑:
-        1. 检查点击是否发生在“可交互”的子控件上。
-        2. 如果是 (例如点在滚动条或文本框上)，则调用 super()，
-           让 Qt 把事件传递给子控件。
-        3. 如果否 (点在背景空白处)，才执行我们自定义的
-           “非 sticky 模式下左键单击关闭”的逻辑。
-        """
-
-        # 1. 定义哪些子控件应该接收点击事件
         child_rects = []
         if self.overlay_scrollbar.isVisible():
             child_rects.append(self.overlay_scrollbar.geometry())
 
-        # 文本框总是可交互的 (即使是 ReadOnly，也需要接收点击以进行可能的拖拽选择)
         child_rects.append(self.top_content.geometry())
-
-        # 底部标签由 eventFilter 处理，但这里也加上以防万一
         child_rects.append(self.bottom_message_label.geometry())
 
-        # 2. 检查点击位置
         is_on_child = False
         for rect in child_rects:
             if rect.contains(event.pos()):
                 is_on_child = True
                 break
 
-        # 3. 根据点击位置执行不同逻辑
         if is_on_child:
-            # 点击在了滚动条、文本框或底部标签上。
-            # (v4.5.29 的 .raise_() 修复确保了点击滚动条时，
-            #  Qt 会把事件正确地交给滚动条)
             super().mousePressEvent(event)
         else:
-            # 点击在了窗口的“空白”背景上。
-            # 执行我们自定义的“点击背景关闭”逻辑。
             if event.button() == Qt.LeftButton and not self.is_sticky:
                 self.slide_out()
             else:
-                # 确保其他在背景上的点击 (如右键) 也能被正确处理
                 super().mousePressEvent(event)
 
     def get_current_screen_geometry(self):
@@ -635,6 +614,10 @@ class TransparentPopup(QWidget):
 
         self.top_content.setMaximumHeight(10000)
 
+        # v4.5.30 (无改动):
+        # 如果 full_text_to_load 存在 (意味着是大文本且还没加载完)
+        # 那么我们什么都不做，等待 load_full_text 完成。
+        # 如果它为 None (小文本，或大文本已加载完)，我们才更新滚动条
         if self.full_text_to_load is None:
             self.top_content.verticalScrollBar().setValue(0)
             QTimer.singleShot(0, self.update_overlay_scrollbar)
@@ -653,11 +636,17 @@ class TransparentPopup(QWidget):
         self.top_content.setMaximumHeight(162)
         cursor = self.top_content.textCursor(); cursor.clearSelection(); self.top_content.setTextCursor(cursor)
 
-        # v4.5.22 文本异步加载逻辑
+        # --- MODIFIED: v4.5.30 修复 Bug 6 ---
+        # 这里的逻辑也需要同步
         if self.full_text_to_load is not None:
+            # 如果是一个大文本，并且它还没有被加载
+            # (例如：复制 -> sticky -> 立即 unsticky)
+            # 我们就重置为 "●"
             self.top_content.setText("●")
         else:
+            # 否则 (小文本，或已加载的大文本)，重置为原始文本
             self.top_content.setText(self.original_data.get("top_text"))
+        # --- 修复结束 ---
 
         self.overlay_scrollbar.hide()
         self.disconnect_scrollbar_signals()
