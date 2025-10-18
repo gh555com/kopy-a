@@ -1,27 +1,24 @@
-# q3.py (v4.5.25 - Scrollbar Fix v3)
+# q3.py (v4.5.26 - 双重修复)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.25 版本特性 (基于 v4.5.24):
-- 【Bug 修复】滚动条 Bug 最终修复 (v3)。
-  - 问题: v4.5.23 和 v4.5.24 依赖 QStyle.hitTestComplexControl 的
-    方案在自定义样式下完全失效，导致滑块拖动功能丢失。
-  - 解决方案: 彻底放弃 hitTestComplexControl。
-    改用 QStyle.subControlRect 手动获取 "滑块" 和 "箭头" 的
-    精确矩形区域，并进行手动碰撞检测。
-    - 如果点击坐标落在这些矩形内，则立即将事件交由 super() 处理，
-      100% 恢复拖动和箭头点击功能。
-    - 仅当点击坐标在所有子控件矩形之外 (即轨道空白处) 时，
-      才执行自定义的“点击跳转”逻辑。
-
-v4.5.24 版本特性:
-- 【Bug 修复】尝试修复滚动条 Bug (v2)，但方案 (hitTestComplexControl)
-  依然有缺陷。 (注：此修复不成功)
-
-v4.5.23 版本特性:
-- 【Bug 修复】尝试修复 ClickJumpScrollBar 的 Bug (v1)。 (注：此修复不成功)
-- 【代码恢复】加回 horizontalScrollBar().setRange(0, 0) 以禁用水平滚动。
+v4.5.26 版本特性 (基于 v4.5.25):
+- 【Bug 1 修复】滚动条 Bug 最终修复 (v4)。
+  - 问题: v4.5.23-25 的修复思路（拦截 mousePressEvent）是
+    根本性错误的，它破坏了 Qt 的原生拖动事件链。
+  - 解决方案: 采用全新思路，完全重写 ClickJumpScrollBar。
+    - mousePressEvent: 只记录状态，无条件调用 super()，
+      100% 保证原生拖动功能不受干扰。
+    - mouseReleaseEvent: 在这里进行逻辑判断。
+      - 检查这是一个“拖动”还是“单击”。
+      - 如果是“单击”，才执行 v4.5.25 的手动矩形检测逻辑来判断
+        是否在轨道上，并执行跳转。
+      - 如果是“拖动”，则什么都不做，原生逻辑已处理完毕。
+- 【Bug 2 修复】修复了 Sticky 模式下复制无提示音的 Bug。
+  - 问题: 检查 Sticky 状态的代码在播放音效的代码之前，导致
+    Sticky 弹窗会同时阻止新 UI 和新音效。
+  - 解决方案: 将播放音效的逻辑移动到检查 Sticky 状态之前。
 """
 import sys
 import os
@@ -90,65 +87,108 @@ class StickyTextEdit(QTextEdit):
         super().keyPressEvent(event)
 
 
-# --- MODIFIED: v4.5.25 - 滚动条 Bug 最终修复 (v3) ---
+# --- MODIFIED: v4.5.26 - 滚动条 Bug 最终修复 (v4) ---
 class ClickJumpScrollBar(QScrollBar):
     """
-    v4.5.25: 滚动条 Bug 最终修复 (v3)。
+    v4.5.26: 滚动条 Bug 最终修复 (v4) - 全新思路
 
-    v4.5.23 和 v4.5.24 使用 QStyle.hitTestComplexControl 的尝试失败了。
-    此版本切换到使用 QStyle.subControlRect 来手动检查点击位置，
-    这种方法更底层，更可靠，不受自定义样式的影响。
+    之前所有 v4.5.23-25 的修复都失败了，因为它们都试图在
+    mousePressEvent 中进行拦截，这破坏了 Qt 的原生拖动事件链。
 
-    逻辑:
-    1. 如果是右键点击 -> 交给 super() 处理 (菜单)。
-    2. 主动获取 "滑块"、"上箭头"、"下箭头" 的精确矩形区域 (Rect)。
-    3. 如果点击坐标在上述任一矩形内 -> 立即交给 super() 处理 (恢复拖动/箭头)。
-    4. 如果点击坐标不在上述矩形内 (即在轨道空白处) -> 才执行自定义的“点击跳转”逻辑。
+    新逻辑:
+    1. __init__: 初始化两个状态变量 self.press_pos 和 self.press_value。
+    2. mousePressEvent:
+       - 不做任何检测！
+       - 只记录按下的位置和值。
+       - 立即、无条件地调用 super()，让原生拖动逻辑 100% 正常启动。
+    3. mouseReleaseEvent:
+       - 这才是我们实现自定义逻辑的地方。
+       - 首先调用 super()。
+       - 检查：这次操作是不是一个“单纯的单击”？
+         (通过比较按下和释放的位置/值)
+       - 如果是“单击”：
+         - 我们才在这里执行 v4.5.25 的“手动矩形检测”逻辑。
+         - 如果单击在轨道空白处，执行跳转。
+       - 如果是“拖动”：
+         - 我们什么都不做，原生拖动已经处理完毕。
     """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        # 用来跟踪点击，以区分“单击”和“拖动”
+        self.press_pos = QPoint()
+        self.press_value = 0
+
     def mousePressEvent(self, event):
-        # 1. 保留右键菜单功能
+        # 1. 只记录状态
+        if event.button() == Qt.LeftButton:
+            self.press_pos = event.pos()
+            self.press_value = self.value()
+
+        # 2. 立即、无条件地交给父类处理
+        #    这保证了原生的拖动、箭头点击等功能 100% 不受干扰。
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        # 1. 立即交给父类处理 (这会处理拖动结束等)
+        super().mouseReleaseEvent(event)
+
         if event.button() != Qt.LeftButton:
-            super().mousePressEvent(event)
             return
+
+        # 2. 检查这是不是一个“单纯的单击”
+
+        # a) 检查鼠标是否在按下后发生了拖动
+        # QApplication.startDragDistance() 通常是一个小值，如 4 像素
+        # (event.pos() - self.press_pos).manhattanLength() 计算了 x 和 y 的总位移
+        moved = (event.pos() - self.press_pos).manhattanLength() > QApplication.startDragDistance()
+
+        # b) 检查值是否被原生拖动改变了
+        # (注意：super().mouseReleaseEvent 已经执行，所以 self.value() 是最新值)
+        value_changed = (self.value() != self.press_value)
+
+        # 如果鼠标移动了，或者值被改变了，说明这是一个拖动操作，我们什么都不做。
+        if moved or value_changed:
+            self.press_pos = QPoint() # 重置
+            return
+
+        # 3. 如果代码执行到这里，说明这是一个“单击”
+        #    现在我们可以安全地执行“点击跳转”逻辑
 
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
 
-        # 2. 主动获取所有子控件的矩形区域
+        # 使用 v4.5.25 的可靠方法：手动获取矩形
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
         add_line_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarAddLine, self)
         sub_line_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSubLine, self)
 
-        click_pos = event.pos()
-
-        # 3. 优先放行: 如果点击在滑块或箭头上，则完全交由父类处理
-        if handle_rect.contains(click_pos) or \
-           add_line_rect.contains(click_pos) or \
-           sub_line_rect.contains(click_pos):
-            super().mousePressEvent(event)
+        # 检查“单击”是否发生在滑块或箭头上
+        # (我们使用 self.press_pos，因为这是单击开始的地方)
+        if handle_rect.contains(self.press_pos) or \
+           add_line_rect.contains(self.press_pos) or \
+           sub_line_rect.contains(self.press_pos):
+            # 单击在滑块或箭头上，原生 super() 已经处理了，我们不做任何事
             return
 
-        # 4. 如果代码执行到这里，说明 100% 点击在了轨道空白处
+        # 4. 如果代码执行到这里，说明这是在“轨道空白处”的“单击”
 
-        # 获取 handle_rect 用于计算，即使点击不在 handle 上
         if handle_rect.isNull():
-             handle_rect = QRect(0, 0, 0, 0) # 安全保护
+             handle_rect = QRect(0, 0, 0, 0)
 
         if self.orientation() == Qt.Vertical:
-            # 使用 handle_rect.height() 而不是 0 来正确计算
             available_space = self.height() - handle_rect.height()
-            click_pos_val = event.y() - handle_rect.height() / 2
+            click_pos_val = self.press_pos.y() - handle_rect.height() / 2
         else:
             available_space = self.width() - handle_rect.width()
-            click_pos_val = event.x() - handle_rect.width() / 2
+            click_pos_val = self.press_pos.x() - handle_rect.width() / 2
 
         if available_space > 0:
             ratio = max(0.0, min(1.0, click_pos_val / available_space))
             new_value = self.minimum() + ratio * (self.maximum() - self.minimum())
             self.setValue(int(new_value))
 
-        event.accept()
-        return
+        # 重置
+        self.press_pos = QPoint()
 
 
 class ClipboardMonitor(QApplication):
@@ -275,14 +315,24 @@ class ClipboardMonitor(QApplication):
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
 
+    # --- MODIFIED: v4.5.26 - 修复音效 Bug ---
     def on_clipboard_changed(self):
         if self.is_on_cooldown: return
         mime_data = self.clipboard().mimeData()
         data = self.process_clipboard_data(mime_data)
         if not data: return
+
+        # --- v4.5.26 修复 Bug 2 ---
+        # 1. 首先播放声音 (除非是清空操作)
+        if data.get("type") != "clear":
+            self.play_random_sound()
+
+        # 2. 然后再检查 sticky 状态
+        #    这样即使 sticky 阻止了 UI，声音也能播放
         if any(p.is_sticky for p in self.active_popups):
-            self.set_cooldown(); return
-        if data.get("type") != "clear": self.play_random_sound()
+            self.set_cooldown()
+            return # 阻止新 UI 弹窗，但声音已播放
+        # --- 修复结束 ---
 
         stationary_popup = next((p for p in reversed(self.active_popups) if not (hasattr(p, 'is_sliding_out') and p.is_sliding_out)), None)
         if stationary_popup and not stationary_popup.is_sticky:
@@ -348,7 +398,7 @@ class TransparentPopup(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
 
-        # v4.5.25: 使用最终修复版 v3 的滚动条
+        # v4.5.26: 使用最终修复版 v4 的滚动条
         self.overlay_scrollbar = ClickJumpScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical); self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
@@ -509,7 +559,6 @@ class TransparentPopup(QWidget):
         self.top_content.setReadOnly(False)
         self.top_content.setTextInteractionFlags(Qt.TextEditorInteraction)
 
-        # v4.5.23: 遵从指示，加回此行以强制禁用水平滚动
         self.top_content.horizontalScrollBar().setRange(0, 0)
 
         self.top_content.setMaximumHeight(10000)
