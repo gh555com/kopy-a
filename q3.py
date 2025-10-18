@@ -540,6 +540,7 @@ if __name__ == "__main__":
     print("="*20 + " 系统可用字体家族名列表 " + "="*20)
     db = QFontDatabase(); print(sorted(list(set(QFont(name).family() for name in db.families()))))
     print("="*63)
+    一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
     v4.5.16 版本特性 (基于 v4.5.15):
     - 【Bug 修复】修复 v4.5.15 中引入的
     signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
