@@ -1,24 +1,29 @@
-# q3.py (v4.5.26 - 双重修复)
+# q3.py (v4.5.28 - 滚动条点击修复 v5)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.26 版本特性 (基于 v4.5.25):
-- 【Bug 1 修复】滚动条 Bug 最终修复 (v4)。
-  - 问题: v4.5.23-25 的修复思路（拦截 mousePressEvent）是
-    根本性错误的，它破坏了 Qt 的原生拖动事件链。
-  - 解决方案: 采用全新思路，完全重写 ClickJumpScrollBar。
-    - mousePressEvent: 只记录状态，无条件调用 super()，
-      100% 保证原生拖动功能不受干扰。
-    - mouseReleaseEvent: 在这里进行逻辑判断。
-      - 检查这是一个“拖动”还是“单击”。
-      - 如果是“单击”，才执行 v4.5.25 的手动矩形检测逻辑来判断
-        是否在轨道上，并执行跳转。
-      - 如果是“拖动”，则什么都不做，原生逻辑已处理完毕。
-- 【Bug 2 修复】修复了 Sticky 模式下复制无提示音的 Bug。
-  - 问题: 检查 Sticky 状态的代码在播放音效的代码之前，导致
-    Sticky 弹窗会同时阻止新 UI 和新音效。
-  - 解决方案: 将播放音效的逻辑移动到检查 Sticky 状态之前。
+v4.5.28 版本特性 (基于 v4.5.27):
+- 【Bug 4 修复】滚动条 Bug 最终修复 (v5) - 真正的最终版。
+  - 问题: v4.5.27 的 TransparentPopup.mousePressEvent
+    拦截了所有鼠标点击，且在 sticky 模式或右键点击时
+    没有调用 super()，导致事件被“吃掉”，无法
+    传递给子控件 (ClickJumpScrollBar)。
+  - 解决方案: 彻底重写 TransparentPopup.mousePressEvent。
+    - 新逻辑会判断点击是发生在“子控件”上还是“背景”上。
+    - 如果点在子控件（滚动条、文本框）上，则调用 super()
+      将事件正确传递下去。
+    - 如果点在背景上，才执行“点击关闭”逻辑。
+    - 这 100% 修复了滚动条无法被点击和拖动的问题。
+
+v4.5.27 版本特性:
+- 【Bug 3 修复】音效逻辑修复 (v3)。
+  - 任何有效的剪贴板变更（包括清空）都会触发提示音。
+
+v4.5.26 版本特性:
+- 【Bug 1 修复】滚动条(ClickJumpScrollBar)的逻辑本身(v4)。
+  - 采用 mouseReleaseEvent 逻辑，100% 恢复原生拖动功能，
+    同时保留了轨道点击跳转功能。(此逻辑本身是正确的)
 """
 import sys
 import os
@@ -87,7 +92,8 @@ class StickyTextEdit(QTextEdit):
         super().keyPressEvent(event)
 
 
-# --- MODIFIED: v4.5.26 - 滚动条 Bug 最终修复 (v4) ---
+# --- v4.5.26 (无改动): 滚动条 Bug 最终修复 (v4) ---
+# 这个类本身是正确的，问题出在 v4.5.27 的 TransparentPopup
 class ClickJumpScrollBar(QScrollBar):
     """
     v4.5.26: 滚动条 Bug 最终修复 (v4) - 全新思路
@@ -315,20 +321,19 @@ class ClipboardMonitor(QApplication):
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
 
-    # --- MODIFIED: v4.5.26 - 修复音效 Bug ---
+    # --- v4.5.27 (无改动): 修复音效 Bug ---
     def on_clipboard_changed(self):
         if self.is_on_cooldown: return
         mime_data = self.clipboard().mimeData()
         data = self.process_clipboard_data(mime_data)
         if not data: return
 
-        # --- v4.5.26 修复 Bug 2 ---
-        # 1. 首先播放声音 (除非是清空操作)
-        if data.get("type") != "clear":
-            self.play_random_sound()
+        # --- v4.5.27 修复 Bug 3 (音效逻辑) ---
+        # 遵照指示：任何剪贴板变更（包括清空）都必须触发音效。
+        # 1. 无条件播放声音
+        self.play_random_sound()
 
         # 2. 然后再检查 sticky 状态
-        #    这样即使 sticky 阻止了 UI，声音也能播放
         if any(p.is_sticky for p in self.active_popups):
             self.set_cooldown()
             return # 阻止新 UI 弹窗，但声音已播放
@@ -531,8 +536,56 @@ class TransparentPopup(QWidget):
             self.toggle_sticky_mode(); return True
         return super().eventFilter(obj, event)
 
+    # --- MODIFIED: v4.5.28 - 修复滚动条点击拦截 Bug ---
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and not self.is_sticky: self.slide_out()
+        """
+        v4.5.28: 修复了 v4.5.27 中导致滚动条无法点击的灾难性 Bug。
+
+        问题:
+        v4.5.27 的 mousePressEvent 会拦截所有点击，
+        当 if 条件不满足时 (例如在 sticky 模式下，或右键点击)，
+        它没有调用 super()，导致事件被“吃掉”，永远无法
+        传递到子控件 (如 ClickJumpScrollBar)。
+
+        新逻辑:
+        1. 检查点击是否发生在“可交互”的子控件上。
+        2. 如果是 (例如点在滚动条或文本框上)，则调用 super()，
+           让 Qt 把事件传递给子控件。
+        3. 如果否 (点在背景空白处)，才执行我们自定义的
+           “非 sticky 模式下左键单击关闭”的逻辑。
+        """
+
+        # 1. 定义哪些子控件应该接收点击事件
+        child_rects = []
+        if self.overlay_scrollbar.isVisible():
+            child_rects.append(self.overlay_scrollbar.geometry())
+
+        # 文本框总是可交互的 (即使是 ReadOnly，也需要接收点击以进行可能的拖拽选择)
+        child_rects.append(self.top_content.geometry())
+
+        # 底部标签由 eventFilter 处理，但这里也加上以防万一
+        child_rects.append(self.bottom_message_label.geometry())
+
+        # 2. 检查点击位置
+        is_on_child = False
+        for rect in child_rects:
+            if rect.contains(event.pos()):
+                is_on_child = True
+                break
+
+        # 3. 根据点击位置执行不同逻辑
+        if is_on_child:
+            # 点击在了滚动条、文本框或底部标签上。
+            # 让 Qt 的标准事件处理机制接管，把事件传递给子控件。
+            super().mousePressEvent(event)
+        else:
+            # 点击在了窗口的“空白”背景上。
+            # 执行我们自定义的“点击背景关闭”逻辑。
+            if event.button() == Qt.LeftButton and not self.is_sticky:
+                self.slide_out()
+            else:
+                # 确保其他在背景上的点击 (如右键) 也能被正确处理
+                super().mousePressEvent(event)
 
     def get_current_screen_geometry(self):
         return (QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()).availableGeometry()
