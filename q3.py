@@ -1,29 +1,33 @@
-# q3.py (v4.5.28 - 滚动条点击修复 v5)
+# q3.py (v4.5.29 - 滚动条堆叠顺序修复 v6)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.28 版本特性 (基于 v4.5.27):
-- 【Bug 4 修复】滚动条 Bug 最终修复 (v5) - 真正的最终版。
-  - 问题: v4.5.27 的 TransparentPopup.mousePressEvent
-    拦截了所有鼠标点击，且在 sticky 模式或右键点击时
-    没有调用 super()，导致事件被“吃掉”，无法
-    传递给子控件 (ClickJumpScrollBar)。
-  - 解决方案: 彻底重写 TransparentPopup.mousePressEvent。
-    - 新逻辑会判断点击是发生在“子控件”上还是“背景”上。
-    - 如果点在子控件（滚动条、文本框）上，则调用 super()
-      将事件正确传递下去。
-    - 如果点在背景上，才执行“点击关闭”逻辑。
-    - 这 100% 修复了滚动条无法被点击和拖动的问题。
+v4.5.29 版本特性 (基于 v4.5.28):
+- 【Bug 5 修复】滚动条 Bug 最终修复 (v6) - 堆叠顺序 (Z-order)
+  - 问题: 经用户 v4.5.28 测试，滚动条滑块依然无法选中。
+  - 根源: 在 __init__ 中，self.top_content (文本框) 在
+    self.overlay_scrollbar (滚动条) 之后创建，导致
+    文本框透明地覆盖在滚动条之上，拦截了所有本应
+    属于滚动条的点击事件。
+  - 解决方案: 在 __init__ 方法末尾，调用
+    `self.overlay_scrollbar.raise_()`，
+    将其提升到子控件堆叠顺序的最顶层，确保它能
+    正确接收鼠标事件。
+  - (同时为 v4.5.22 的文本异步加载逻辑错误道歉)
+
+v4.5.28 版本特性:
+- 【Bug 4 修复】滚动条点击事件拦截修复 (v5)
+  - 重写了 TransparentPopup.mousePressEvent，
+    确保点击子控件时事件能正确传递。(此逻辑正确)
 
 v4.5.27 版本特性:
 - 【Bug 3 修复】音效逻辑修复 (v3)。
-  - 任何有效的剪贴板变更（包括清空）都会触发提示音。
+  - 任何变更（包括清空）都触发音效。(此逻辑正确)
 
 v4.5.26 版本特性:
-- 【Bug 1 修复】滚动条(ClickJumpScrollBar)的逻辑本身(v4)。
-  - 采用 mouseReleaseEvent 逻辑，100% 恢复原生拖动功能，
-    同时保留了轨道点击跳转功能。(此逻辑本身是正确的)
+- 【Bug 1 修复】滚动条(ClickJumpScrollBar)的逻辑(v4)。
+  - 采用 mouseReleaseEvent。(此逻辑正确)
 """
 import sys
 import os
@@ -93,7 +97,7 @@ class StickyTextEdit(QTextEdit):
 
 
 # --- v4.5.26 (无改动): 滚动条 Bug 最终修复 (v4) ---
-# 这个类本身是正确的，问题出在 v4.5.27 的 TransparentPopup
+# 这个类本身是正确的，问题出在 v4.5.27/28 的 TransparentPopup
 class ClickJumpScrollBar(QScrollBar):
     """
     v4.5.26: 滚动条 Bug 最终修复 (v4) - 全新思路
@@ -404,6 +408,7 @@ class TransparentPopup(QWidget):
         self.setFixedSize(222, 222)
 
         # v4.5.26: 使用最终修复版 v4 的滚动条
+        # (v4.5.29 修复) 必须先创建它，才能在 setup_ui 之后 .raise_()
         self.overlay_scrollbar = ClickJumpScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical); self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
@@ -422,6 +427,16 @@ class TransparentPopup(QWidget):
             self.text_load_timer.setSingleShot(True)
             self.text_load_timer.timeout.connect(self.load_full_text)
             self.text_load_timer.start(self.SLIDE_IN_DURATION + 10)
+
+        # --- MODIFIED: v4.5.29 - 修复滚动条堆叠顺序 Bug ---
+        # 文本框(top_content)是在滚动条(overlay_scrollbar)之后
+        # 创建的(在 setup_ui 中)，所以它会覆盖在滚动条之上，
+        # 导致滚动条无法被点击。
+        #
+        # .raise_() 会将滚动条提升到子控件堆叠顺序的最顶层，
+        # 确保它能接收到鼠标事件。
+        self.overlay_scrollbar.raise_()
+        # --- 修复结束 ---
 
     def setup_colors_and_styles(self):
         common_bottom_style = "padding-top: 8px;"
@@ -456,6 +471,7 @@ class TransparentPopup(QWidget):
 
         self.top_content = StickyTextEdit(self); self.top_content.popup = self
 
+        # v4.5.22 文本异步加载逻辑：先显示占位符
         if self.full_text_to_load is not None:
             self.top_content.setText("●")
         else:
@@ -480,6 +496,7 @@ class TransparentPopup(QWidget):
         layout.addStretch()
         layout.addWidget(self.bottom_message_label, 0, Qt.AlignHCenter)
 
+    # v4.5.22 文本异步加载逻辑
     def load_full_text(self):
         if self.full_text_to_load is None: return
 
@@ -536,7 +553,8 @@ class TransparentPopup(QWidget):
             self.toggle_sticky_mode(); return True
         return super().eventFilter(obj, event)
 
-    # --- MODIFIED: v4.5.28 - 修复滚动条点击拦截 Bug ---
+    # --- v4.5.28 (无改动): 修复滚动条点击拦截 Bug ---
+    # 这个逻辑本身是正确的，它依赖 v4.5.29 的堆叠顺序修复
     def mousePressEvent(self, event):
         """
         v4.5.28: 修复了 v4.5.27 中导致滚动条无法点击的灾难性 Bug。
@@ -576,7 +594,8 @@ class TransparentPopup(QWidget):
         # 3. 根据点击位置执行不同逻辑
         if is_on_child:
             # 点击在了滚动条、文本框或底部标签上。
-            # 让 Qt 的标准事件处理机制接管，把事件传递给子控件。
+            # (v4.5.29 的 .raise_() 修复确保了点击滚动条时，
+            #  Qt 会把事件正确地交给滚动条)
             super().mousePressEvent(event)
         else:
             # 点击在了窗口的“空白”背景上。
@@ -634,6 +653,7 @@ class TransparentPopup(QWidget):
         self.top_content.setMaximumHeight(162)
         cursor = self.top_content.textCursor(); cursor.clearSelection(); self.top_content.setTextCursor(cursor)
 
+        # v4.5.22 文本异步加载逻辑
         if self.full_text_to_load is not None:
             self.top_content.setText("●")
         else:
@@ -643,7 +663,7 @@ class TransparentPopup(QWidget):
         self.disconnect_scrollbar_signals()
         try:
             self.top_content.textChanged.disconnect(self.update_overlay_scrollbar)
-        except TypeError: pass
+        except (TypeError, RuntimeError): pass
         self.update()
 
     def animate_border(self):
