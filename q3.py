@@ -1,23 +1,23 @@
-# q3.py (v4.5.21 - Fixes & Enhancements)
+# q3.py (v4.5.22 - Async Text Loading)
 # -*- coding: utf-8 -*-
 """
 一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
 
-v4.5.21 版本特性 (基于 v4.5.20):
-- 【功能优化】滚动条: 点击轨道的空白区域现在会直接跳转到该位置，而不是翻页。
-  - 解决方案: 创建了一个 QScrollBar 的子类 ClickJumpScrollBar，
-    并重写了 mousePressEvent 来实现新行为。
-- 【Bug 修复】修复了关闭弹窗时可能发生的 RuntimeError。
-  - 原因: 动画设置了 DeleteWhenStopped，在 finished 信号触发时，
-    动画对象已被销毁，但后续的清理代码仍在尝试访问它。
-  - 解决方案: 在 close_popup 中使用 try...except RuntimeError 块
-    来安全地处理这个问题。
-- 【Bug 修复】修复了 DeprecationWarning (an integer is required)。
-  - 原因: paintEvent 中的 adjusted() 函数需要整数参数，但传入了浮点数。
-  - 解决方案: 在调用前显式地将浮点数转换为整数。
+v4.5.22 版本特性 (基于 v4.5.21):
+- 【性能优化】异步加载大文本。
+  - 问题: 复制大段文本时，setText() 会阻塞主线程，导致弹窗UI卡顿数秒才出现。
+  - 解决方案:
+    1. 弹窗创建时，立即显示一个 "●" 占位符，并开始滑入动画。
+    2. 使用 QTimer.singleShot，在滑入动画 (88ms) 结束后，再调用
+       load_full_text() 方法去执行 setText()。
+    3. 这保证了音效和UI的即时响应，将不可避免的卡顿延迟到UI可见之后。
+- 【Bug 修复】确保在弹窗关闭 (slide_out) 或取消固定 (deactivate_sticky_mode)
+  时，能正确处理这个新的异步加载逻辑。
 
-v4.5.20 版本特性:
-- 【性能】移除了所有与拖拽和画布移动相关的限制性代码。
+v4.5.21 版本特性:
+- 【功能优化】滚动条: 点击轨道的空白区域现在会直接跳转到该位置。
+- 【Bug 修复】修复了关闭弹窗时可能发生的 RuntimeError。
+- 【Bug 修复】修复了 DeprecationWarning (an integer is required)。
 """
 import sys
 import os
@@ -64,11 +64,6 @@ def _get_path_size(path):
 
 # --- v4.5.19: 一个干净的 QTextEdit 子类 ---
 class StickyTextEdit(QTextEdit):
-    """
-    v4.5.19/v4.5.20/v4.5.21:
-    - 这个类非常干净，只包含拦截粘贴和内部复制快捷键的逻辑。
-    - 所有关于鼠标拖拽的覆盖都已被移除，以实现最纯粹、最高性能的默认行为。
-    """
     internal_copy_triggered = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -91,40 +86,30 @@ class StickyTextEdit(QTextEdit):
         super().keyPressEvent(event)
 
 
-# --- NEW: v4.5.21 - 实现点击跳转的滚动条 ---
+# --- v4.5.21: 实现点击跳转的滚动条 ---
 class ClickJumpScrollBar(QScrollBar):
-    """
-    一个自定义的 QScrollBar 子类，实现了点击轨道空白处
-    直接跳转到该位置的功能，而不是翻页。
-    """
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             opt = QStyleOptionSlider()
             self.initStyleOption(opt)
             handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
 
-            # 如果点击位置不在滑块上
             if not handle_rect.contains(event.pos()):
                 if self.orientation() == Qt.Vertical:
-                    # 计算可用的总像素行程
                     available_height = self.height() - handle_rect.height()
-                    # 计算鼠标点击位置在行程中的相对位置 (以滑块中心为准)
                     relative_pos = event.y() - handle_rect.height() / 2
                 else:
                     available_height = self.width() - handle_rect.width()
                     relative_pos = event.x() - handle_rect.width() / 2
 
                 if available_height > 0:
-                    # 计算点击位置的比例
                     ratio = max(0.0, min(1.0, relative_pos / available_height))
-                    # 根据比例计算新的滚动值
                     new_value = self.minimum() + ratio * (self.maximum() - self.minimum())
                     self.setValue(int(new_value))
                     event.accept()
                     return
 
         super().mousePressEvent(event)
-# --- 新增类结束 ---
 
 
 class ClipboardMonitor(QApplication):
@@ -274,22 +259,25 @@ class ClipboardMonitor(QApplication):
             new_popup.update_bottom_text(data["bottom_template"].format("●"))
             self.calculate_total_size_async(data["paths"], new_popup, data["bottom_template"])
 
-    # --- MODIFIED: v4.5.21 - 修复 RuntimeError ---
+    # v4.5.21 修复
     def close_popup(self, popup):
         if popup in self.active_popups: self.active_popups.remove(popup)
 
-        # v4.5.21: 使用 try...except 块来安全地停止动画
         for anim_name in ['slide_anim', 'anim_group']:
             try:
                 anim = getattr(popup, anim_name, None)
                 if anim and anim.state() == QPropertyAnimation.Running:
                     anim.stop()
             except RuntimeError:
-                # 捕获 "wrapped C/C++ object has been deleted" 错误并忽略
-                pass
+                pass # 对象已被删除
 
-        for timer_name in ['lifecycle_timer', 'border_animation_timer']:
-            getattr(popup, timer_name, QTimer()).stop()
+        # v4.5.22: 停止所有定时器（包括 text_load_timer）
+        # slide_out 已经处理了，但这里双重保险
+        for timer_name in ['lifecycle_timer', 'border_animation_timer', 'text_load_timer']:
+            timer = getattr(popup, timer_name, None)
+            if timer:
+                timer.stop()
+
         popup.disconnect_scrollbar_signals()
         popup.close()
 
@@ -308,18 +296,26 @@ class TransparentPopup(QWidget):
         QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
     """
 
+    # --- MODIFIED: v4.5.22 ---
     def __init__(self, data, monitor, color_mode=0):
         super().__init__()
         self.monitor, self.color_mode, self.original_data = monitor, color_mode, data
         self.is_sticky, self.border_thickness, self.border_dash_offset = False, 1, 0
         self.lifecycle_remaining, self.lifecycle_start_time = self.LIFECYCLE_SECONDS * 1000, None
 
+        # v4.5.22: 异步加载相关
+        self.full_text_to_load = None
+        self.text_load_timer = None
+        if self.original_data.get("type") == "text":
+            # 存储文本，但不在 setup_ui 中立即设置
+            self.full_text_to_load = self.original_data.get("top_text", "")
+
         self.border_animation_timer = QTimer(self); self.border_animation_timer.timeout.connect(self.animate_border)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
 
-        # v4.5.21: 使用新的 ClickJumpScrollBar 替换 QScrollBar
+        # v4.5.21: 使用 ClickJumpScrollBar
         self.overlay_scrollbar = ClickJumpScrollBar(self)
         self.overlay_scrollbar.setOrientation(Qt.Vertical); self.overlay_scrollbar.hide()
         self.is_scrollbar_connected = False
@@ -332,6 +328,14 @@ class TransparentPopup(QWidget):
         self.show()
         self.slide_in()
         self.start_lifecycle()
+
+        # v4.5.22: 如果有待加载的文本，设置一个定时器
+        if self.full_text_to_load is not None:
+            self.text_load_timer = QTimer(self)
+            self.text_load_timer.setSingleShot(True)
+            self.text_load_timer.timeout.connect(self.load_full_text)
+            # 在滑入动画结束后再加载
+            self.text_load_timer.start(self.SLIDE_IN_DURATION + 10)
 
     def setup_colors_and_styles(self):
         common_bottom_style = "padding-top: 8px;"
@@ -359,13 +363,21 @@ class TransparentPopup(QWidget):
         palette.setColor(QPalette.HighlightedText, QColor(Qt.white))
         self.top_content.setPalette(palette)
 
+    # --- MODIFIED: v4.5.22 ---
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 10, 0, 10); layout.setSpacing(10)
         font = QFont("Consolas", 11); font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"])
 
         self.top_content = StickyTextEdit(self); self.top_content.popup = self
-        self.top_content.setText(self.original_data.get("top_text"))
+
+        # v4.5.22: 异步加载文本
+        if self.full_text_to_load is not None:
+            self.top_content.setText("●") # 先设置占位符
+        else:
+            # 对于文件、图片等，立即设置
+            self.top_content.setText(self.original_data.get("top_text"))
+
         self.top_content.setReadOnly(True); self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
         self.top_content.setFont(font); self.top_content.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
         self.top_content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.top_content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -384,6 +396,24 @@ class TransparentPopup(QWidget):
         layout.addWidget(self.top_content, 0, Qt.AlignHCenter)
         layout.addStretch()
         layout.addWidget(self.bottom_message_label, 0, Qt.AlignHCenter)
+
+    # --- NEW: v4.5.22 ---
+    def load_full_text(self):
+        """
+        v4.5.22: 由 QTimer 触发，在弹窗显示后加载完整的文本内容。
+        """
+        if self.full_text_to_load is None: return # 可能已被取消或加载
+
+        try:
+            self.top_content.setText(self.full_text_to_load)
+            self.full_text_to_load = None # 标记为已加载
+
+            # 如果加载时弹窗已经处于固定模式，我们需要手动更新一下滚动条
+            if self.is_sticky:
+                QTimer.singleShot(0, self.update_overlay_scrollbar)
+
+        except RuntimeError:
+            pass # 捕获错误，以防弹窗在加载前被关闭
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -455,22 +485,34 @@ class TransparentPopup(QWidget):
         self.top_content.setReadOnly(False)
         self.top_content.setTextInteractionFlags(Qt.TextEditorInteraction)
         self.top_content.setMaximumHeight(10000)
-        self.top_content.verticalScrollBar().setValue(0)
-        self.top_content.setFocus(Qt.MouseFocusReason)
 
-        QTimer.singleShot(0, self.update_overlay_scrollbar)
-        self.top_content.textChanged.connect(self.update_overlay_scrollbar)
+        # v4.5.22: 如果文本还没加载，此时不要设置滚动条
+        if self.full_text_to_load is None:
+            self.top_content.verticalScrollBar().setValue(0)
+            QTimer.singleShot(0, self.update_overlay_scrollbar)
+            self.top_content.textChanged.connect(self.update_overlay_scrollbar)
+
+        self.top_content.setFocus(Qt.MouseFocusReason)
         self.update()
 
+    # --- MODIFIED: v4.S.22 ---
     def deactivate_sticky_mode(self):
         if self.lifecycle_remaining > 0: self.start_lifecycle()
         self.border_animation_timer.stop(); self.border_dash_offset = 0; self.border_thickness = 1
 
         self.top_content.setReadOnly(True)
         self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
+
         self.top_content.setMaximumHeight(162)
         cursor = self.top_content.textCursor(); cursor.clearSelection(); self.top_content.setTextCursor(cursor)
-        self.top_content.setText(self.original_data.get("top_text"))
+
+        # v4.5.22: 智能重置文本
+        if self.full_text_to_load is not None:
+            # 如果完整的文本还没来得及加载，就重置为占位符
+            self.top_content.setText("●")
+        else:
+            # 如果已经加载完毕，重置为完整的原始文本（以清除用户编辑）
+            self.top_content.setText(self.original_data.get("top_text"))
 
         self.overlay_scrollbar.hide()
         self.disconnect_scrollbar_signals()
@@ -482,8 +524,13 @@ class TransparentPopup(QWidget):
     def animate_border(self):
         self.border_dash_offset = (self.border_dash_offset - 1) % -10; self.update()
 
+    # --- MODIFIED: v4.S.22 ---
     def slide_out(self):
-        for timer in [self.lifecycle_timer, self.border_animation_timer]: timer.stop()
+        # v4.5.22: 确保停止所有定时器
+        for timer in [self.lifecycle_timer, self.border_animation_timer, getattr(self, 'text_load_timer', None)]:
+            if timer:
+                timer.stop()
+
         if hasattr(self, 'is_sliding_out') and self.is_sliding_out: return
         self.is_sliding_out = True
 
@@ -507,7 +554,7 @@ class TransparentPopup(QWidget):
     def update_bottom_text(self, text):
         self.bottom_message_label.setText(text)
 
-    # --- MODIFIED: v4.5.21 - 修复 DeprecationWarning ---
+    # v4.5.21 修复
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
         painter.fillRect(self.rect(), self.background_color)
@@ -515,7 +562,6 @@ class TransparentPopup(QWidget):
         if self.is_sticky: pen.setDashOffset(self.border_dash_offset)
         painter.setPen(pen)
 
-        # v4.5.21: 显式将 adj 转换为整数以修复 DeprecationWarning
         adj = self.border_thickness / 2.0
         draw_rect = self.rect().adjusted(int(adj), int(adj), -int(adj), -int(adj))
         painter.drawRect(draw_rect)
