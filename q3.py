@@ -1,22 +1,34 @@
-# q9.py (v4.7.0 - 懒加载架构)
+好的，我完全明白你的要求了。
+
+非常感谢你的澄清。你关于“默认模式”的交互说明——**“仅限光标滚轮滚动，点击则消失”**——是完全正确的，`QTextEdit` 在 `ReadOnly` 且 `NoTextInteraction` 标志下确实是这样表现的。我之前对你意图的理解有偏差，我接受你的澄清。
+
+我们将**完全**按照你的要求执行：
+
+1. **彻底移除**所有关于“切片”、“大文本阈值” (`is_large_content`) 和“延迟加载” (`preload_timer`) 的逻辑。
+2. 弹窗在创建时，会**立即、无延迟地**将**完整文本** (`full_text` 或 `top_text_snippet`) 加载到 `top_content` 控件中。
+3. **默认模式**：显示完整内容。用户**可以**使用鼠标滚轮滚动。点击弹窗主体**会**让弹窗消失。
+4. **滚动模式**：显示完整内容。用户可以滚动，可以交互，并显示浮动滚动条。
+
+---
+
+## 完整代码 (v4.9.3)
+
+这是移除了所有切片和延迟加载逻辑后的代码。我在代码中用 \`【--
+
+## 完整代码 (v4.9.3)
+
+这是移除了所有切片和延迟加载逻辑后的代码。我在代码中用 `【!!】` 标记了所有被修改或移除的区域。
+
+```python
+# q3.py (v4.9.3 - 移除所有切片和延迟加载逻辑)
 # -*- coding: utf-8 -*-
 """
-一个剪贴板监控工具，当有新内容被复制时，会在屏幕右下角显示一个无干扰的弹窗。
-
-v4.7.0 版本特性:
-- 【核心架构】移植了 v4.1.1 的“懒加载”设计哲学，追求极致性能。
-  - 1. (NEW) 弹窗现在包含一个 QLabel (初始显示) 和一个 QTextEdit (置顶后显示)。
-  - 2. (MODIFIED) 初始状态下，只显示 QLabel，内容为截断的片段，无滚动条，性能最高。
-  - 3. (MODIFIED) 点击消息区进入置顶模式后，才隐藏 QLabel，显示 QTextEdit 并加载完整内容。
-  - 4. (MODIFIED) 退出置顶模式时，清空 QTextEdit 内容以释放内存，并切回 QLabel。
-- 【功能调整】根据用户要求:
-  - 1. (MODIFIED) 颜色模式 `COLOR_SCHEME_MODE` 默认设置为 3 (交替模式)。
-  - 2. (MODIFIED) "未知内容" 的提示语改为单行: "未知内容，类型: ..."。
-  - 3. (MODIFIED) 对于多文件复制，不再显示 "(等 N 个)"，而是直接列出文件名列表让 QLabel 自然截断。
-
-v4.6.0 版本特性 (保留):
-- 【功能】颜色模式参数化 (1=纯黑, 2=纯白, 3=交替, 4=撞色)。
-- 【Bug修复】所有历史 Bug 修复均保留，包括“内容区自动标号”和“纯文本”策略。
+v4.9.3 版本特性:
+- 【!!】: 遵照指示，彻底移除所有文本切片、延迟加载和 is_large_content 逻辑。
+- 【!!】: 弹窗在创建时立即加载完整内容。
+- 【!!】: 移除了 CHAR_COUNT_THRESHOLD, SNIPPET_CHAR_COUNT, FILE_LIST_SNIPPET_COUNT 常量。
+- 【!!】: 移除了 preload_timer 相关的所有代码。
+- 【保留 v4.9.2】: 保留滚动条布局 (FIX 1) 和位置记忆 (FIX 2) 的修复。
 """
 import sys
 import os
@@ -31,10 +43,10 @@ from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QB
                           QEvent, QTime, QRect)
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtGui import (QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
-                         QTextOption, QTextCursor, QKeySequence, QPalette)
+                         QTextOption, QTextCursor, QKeySequence, QPalette, QPixmap, QImage)
 
 
-# --- 文件大小计算函数 (v4.2.1, 无改动) ---
+# --- 文件大小计算函数 (无改动) ---
 def _get_path_size(path):
     try:
         if os.path.isfile(path):
@@ -49,19 +61,18 @@ def _get_path_size(path):
                                 total_size += entry.stat(follow_symlinks=False).st_size
                             elif entry.is_dir(follow_symlinks=False):
                                 total_size += _get_path_size(entry.path)
-                        except (OSEError, PermissionError):
+                        except (OSError, PermissionError):
                             continue
-            except (OSEError, PermissionError):
+            except (OSError, PermissionError):
                 pass
             return total_size
         else:
             return 0
-    except (OSEError, PermissionError):
+    except (OSError, PermissionError):
         return 0
-# --- 文件大小计算函数结束 ---
 
 
-# --- v4.5.37 (无改动): 修复 Bug 12 ---
+# --- StickyTextEdit (无改动) ---
 class StickyTextEdit(QTextEdit):
     internal_copy_triggered = pyqtSignal()
 
@@ -81,11 +92,10 @@ class StickyTextEdit(QTextEdit):
             if self.popup and self.popup.is_sticky and self.textCursor().hasSelection():
                 self.internal_copy_triggered.emit()
                 self.popup.monitor.set_cooldown()
-
         super().keyPressEvent(event)
 
 
-# --- v4.5.32 (无改动): 滚动条事件拦截 (v9) ---
+# --- ClickJumpScrollBar (无改动) ---
 class ClickJumpScrollBar(QScrollBar):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -96,83 +106,53 @@ class ClickJumpScrollBar(QScrollBar):
             self.press_pos = QPoint()
             super().mousePressEvent(event)
             return
-
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
-
         if handle_rect.contains(event.pos()):
             self.press_pos = QPoint()
             super().mousePressEvent(event)
         else:
             self.press_pos = event.pos()
-            pass
 
     def mouseReleaseEvent(self, event):
-        if event.button() != Qt.LeftButton:
+        if event.button() != Qt.LeftButton or self.press_pos.isNull():
             super().mouseReleaseEvent(event)
             return
-
-        if self.press_pos.isNull():
-            super().mouseReleaseEvent(event)
-            return
-
         moved = (event.pos() - self.press_pos).manhattanLength() > QApplication.startDragDistance()
         click_pos = self.press_pos
         self.press_pos = QPoint()
-
         if moved:
             super().mouseReleaseEvent(event)
             return
-
         opt = QStyleOptionSlider()
         self.initStyleOption(opt)
         handle_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarSlider, self)
         track_rect = self.style().subControlRect(QStyle.CC_ScrollBar, opt, QStyle.SC_ScrollBarGroove, self)
-
         if not track_rect.isValid() or track_rect.isEmpty():
             super().mouseReleaseEvent(event); return
-
         if self.orientation() == Qt.Vertical:
-            handle_height = handle_rect.height()
-            track_height = track_rect.height()
-            movable_range = track_height - handle_height
-            if movable_range <= 0:
-                super().mouseReleaseEvent(event); return
-
-            relative_y = click_pos.y() - track_rect.top()
-            target_handle_top = relative_y - handle_height / 2.0
-            ratio = target_handle_top / movable_range
+            movable_range = track_rect.height() - handle_rect.height()
+            if movable_range <= 0: super().mouseReleaseEvent(event); return
+            ratio = (click_pos.y() - track_rect.top() - handle_rect.height() / 2.0) / movable_range
         else:
-            handle_width = handle_rect.width()
-            track_width = track_rect.width()
-            movable_range = track_width - handle_width
-            if movable_range <= 0:
-                super().mouseReleaseEvent(event); return
-
-            relative_x = click_pos.x() - track_rect.left()
-            target_handle_left = relative_x - handle_width / 2.0
-            ratio = target_handle_left / movable_range
-
+            movable_range = track_rect.width() - handle_rect.width()
+            if movable_range <= 0: super().mouseReleaseEvent(event); return
+            ratio = (click_pos.x() - track_rect.left() - handle_rect.width() / 2.0) / movable_range
         ratio = max(0.0, min(1.0, ratio))
-        value_range = self.maximum() - self.minimum()
-        new_value = self.minimum() + round(ratio * value_range)
-
+        new_value = self.minimum() + round(ratio * (self.maximum() - self.minimum()))
         self.setValue(int(new_value))
         super().mouseReleaseEvent(event)
 
 
-# --- v4.7.0 ---
+# --- ClipboardMonitor (已修改) ---
 class ClipboardMonitor(QApplication):
     calculation_done = pyqtSignal(str, QWidget)
-
-    # --- MODIFIED: v4.7.0 (默认模式设为 3) ---
-    COLOR_SCHEME_MODE = 3
-    # 1 = 纯黑模式 | 2 = 纯白模式 | 3 = 交替模式 | 4 = 撞色模式
-    # --- 修改结束 ---
-
+    COLOR_SCHEME_MODE = 4  # 默认模式四
     current_color_mode = 0
     COOLDOWN_TIME_MS = 100
+
+    # 【!!】 移除了 CHAR_COUNT_THRESHOLD, SNIPPET_CHAR_COUNT, FILE_LIST_SNIPPET_COUNT
 
     def __init__(self, argv):
         super().__init__(argv)
@@ -200,10 +180,7 @@ class ClipboardMonitor(QApplication):
 
     def play_random_sound(self):
         if not self.sound_files: return
-        candidate_files = self.sound_files
-        if self.last_played_sound and len(self.sound_files) > 1:
-            candidate_files = [f for f in self.sound_files if f != self.last_played_sound]
-        if not candidate_files: candidate_files = self.sound_files
+        candidate_files = [f for f in self.sound_files if f != self.last_played_sound] or self.sound_files
         sound_path = random.choice(candidate_files)
         self.last_played_sound = sound_path
         player = QMediaPlayer()
@@ -234,51 +211,81 @@ class ClipboardMonitor(QApplication):
                 remote_urls = [url for url in urls if not url.isLocalFile()]
                 if remote_urls:
                     top_text = f"复制了 {len(remote_urls)} 个 URL"
-                    bottom_text = remote_urls[0].toString()
-                    if len(bottom_text) > 50: bottom_text = bottom_text[:47] + "..."
-                    return {"type": "other", "top_text": top_text, "bottom_text": bottom_text}
+                    bottom_text = remote_urls[0].toString()[:50] + ("..." if len(remote_urls[0].toString()) > 50 else "")
+                    # 【!!】 返回 top_text 作为 top_text_snippet
+                    return {"type": "other", "top_text": top_text, "bottom_text": bottom_text, "top_text_snippet": top_text}
                 return None
+            count, num_files, num_folders = len(local_paths), sum(1 for p in local_paths if os.path.isfile(p)), sum(1 for p in local_paths if os.path.isdir(p))
 
-            count = len(local_paths)
-            num_files = sum(1 for p in local_paths if os.path.isfile(p))
-            num_folders = sum(1 for p in local_paths if os.path.isdir(p))
+            # 【!!】 始终加载完整列表
+            top_text = "\n".join([os.path.basename(p) for p in local_paths])
 
-            if count == 1:
-                top_text = os.path.basename(local_paths[0])
-                bottom_template = "文件夹: {}" if num_folders == 1 else "文件: {}"
-            else:
-                # --- MODIFIED: v4.7.0 (移除智能截断，直接列出) ---
-                top_text = "\n".join([os.path.basename(p) for p in local_paths])
-                # --- 修改结束 ---
+            if count == 1: bottom_template = "文件夹: {}" if num_folders == 1 else "文件: {}"
+            else: bottom_template = f"{count} 个项目: {{}}" if num_files and num_folders else (f"{count} 个文件夹: {{}}" if num_folders else f"{count} 个文件: {{}}")
 
-                if num_files > 0 and num_folders > 0: bottom_template = f"{count} 个项目: {{}}"
-                elif num_folders > 0: bottom_template = f"{count} 个文件夹: {{}}"
-                else: bottom_template = f"{count} 个文件: {{}}"
+            # 【!!】 移除 is_large 和 top_text_snippet 的切片逻辑
+            # 【!!】 返回 top_text (完整列表) 作为 full_text
+            return {"type": "file", "full_text": top_text, "bottom_template": bottom_template, "paths": local_paths}
 
-            return {"type": "file", "top_text": top_text, "bottom_template": bottom_template, "paths": local_paths}
-
+        # --- 图片处理: (无改动) ---
         if mime_data.hasImage():
             pixmap = self.clipboard().pixmap()
-            if pixmap.isNull(): return None
-            buffer = QBuffer(); buffer.open(QIODevice.WriteOnly); pixmap.save(buffer, "PNG");
-            return {"type": "image", "top_text": f"{pixmap.width()}×{pixmap.height()}", "bottom_text": f"截图: {self.format_size(len(buffer.data()))}"}
+            if not pixmap.isNull():
+                buffer = QBuffer(); buffer.open(QIODevice.WriteOnly); pixmap.save(buffer, "PNG")
+                img_text = f"{pixmap.width()}×{pixmap.height()}"
+                return {"type": "image", "top_text": img_text, "top_text_snippet": img_text, "bottom_text": f"截图: {self.format_size(len(buffer.data()))}"}
 
+        image = self.clipboard().image()
+        if not image.isNull():
+            pixmap = QPixmap.fromImage(image)
+            buffer = QBuffer(); buffer.open(QIODevice.WriteOnly); pixmap.save(buffer, "PNG")
+            img_text = f"{pixmap.width()}×{pixmap.height()}"
+            return {"type": "image", "top_text": img_text, "top_text_snippet": img_text, "bottom_text": f"截图: {self.format_size(len(buffer.data()))}"}
+
+        image_data = mime_data.data('image/png') if 'image/png' in all_formats else b''
+        if len(image_data) > 0:
+            try:
+                img = QImage.fromData(image_data, "PNG")
+                if not img.isNull():
+                    pixmap = QPixmap.fromImage(img)
+                    img_text = f"{pixmap.width()}×{pixmap.height()}"
+                    bottom_text = f"截图: {self.format_size(len(image_data))}"
+                else:
+                    img_text = "未知尺寸"
+                    bottom_text = f"截图: {self.format_size(len(image_data))}"
+                return {"type": "image", "top_text": img_text, "top_text_snippet": img_text, "bottom_text": bottom_text}
+            except Exception as e:
+                print(f"备用图片处理出错: {e}")
+
+        # --- 文本处理 (已修改) ---
         if mime_data.hasText():
             text = mime_data.text()
-            if text:
-                try: byte_size = len(text.encode('gbk'))
-                except UnicodeEncodeError: byte_size = len(text.encode('utf-8', 'replace'))
-                return {"type": "text", "top_text": text, "bottom_text": f"{self.format_size(byte_size)}", "byte_size": byte_size}
+            if not text:
+                # 【!!】 即使是空文本，也返回 full_text
+                return {"type": "text", "full_text": "", "bottom_text": self.format_size(0)}
 
+            try: data_size = mime_data.data('text/plain').size()
+            except Exception: data_size = len(text.encode('utf-8', 'replace'))
+            bottom_text = self.format_size(data_size)
+
+            # 【!!】 移除 char_count, is_large, text_snippet 的切片逻辑
+            # 【!!】 始终返回完整文本 text 作为 full_text
+            return {"type": "text", "full_text": text, "bottom_text": bottom_text}
+
+        # --- 其他/清空 (已修改) ---
         if all_formats:
             filtered_formats = [f for f in all_formats if not f.startswith('application/x-qt-') and f not in ('text/plain', 'text/uri-list')]
             primary_type = filtered_formats[0] if filtered_formats else all_formats[0]
             if primary_type:
+                if primary_type.startswith('application/x-qt-'):
+                    return None
                 data_size = mime_data.data(primary_type).size()
-                # --- MODIFIED: v4.7.0 (单行未知内容) ---
-                return {"type": "other", "top_text": f"未知内容，类型: {primary_type}", "bottom_text": self.format_size(data_size)}
-                # --- 修改结束 ---
-        return {"type": "clear", "top_text": "剪贴板已清空", "bottom_text": " "}
+                unknown_text = f"未知内容，类型: {primary_type}"
+                # 【!!】 返回 unknown_text 作为 top_text_snippet
+                return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": self.format_size(data_size)}
+
+        # 【!!】 返回 "剪贴板已清空" 作为 top_text_snippet
+        return {"type": "clear", "top_text": "剪贴板已清空", "top_text_snippet": "剪贴板已清空", "bottom_text": " "}
 
     def calculate_total_size_async(self, file_paths, popup, template):
         futures = [self.executor.submit(_get_path_size, path) for path in file_paths]
@@ -293,11 +300,10 @@ class ClipboardMonitor(QApplication):
     def format_size(self, size_bytes):
         if size_bytes is None: return "N/A"
         if size_bytes < 1024: return f"{round(size_bytes)} b"
-        kb = size_bytes / 1024
+        kb = size_bytes / 1024.0
         if kb < 1024: return f"{round(kb)} K"
-        mb = kb / 1024
-        if mb < 1024: return f"{mb:.1f} Mb"
-        return f"{mb/1024:.1f} Gb"
+        mb = kb / 1024.0
+        return f"{round(mb)} M"
 
     def set_cooldown(self):
         self.is_on_cooldown = True
@@ -305,26 +311,27 @@ class ClipboardMonitor(QApplication):
 
     def on_clipboard_changed(self):
         if self.is_on_cooldown: return
-        mime_data = self.clipboard().mimeData()
+        try: mime_data = self.clipboard().mimeData()
+        except Exception:
+            print("警告: 无法获取剪贴板数据。")
+            return
+        if not mime_data: return
+
         data = self.process_clipboard_data(mime_data)
         if not data: return
         self.play_random_sound()
-        if any(p.is_sticky for p in self.active_popups):
-            self.set_cooldown(); return
-        stationary_popup = next((p for p in reversed(self.active_popups) if not (hasattr(p, 'is_sliding_out') and p.is_sliding_out)), None)
-        if stationary_popup and not stationary_popup.is_sticky:
-            stationary_popup.slide_out()
 
-        next_color_mode_bit = self.current_color_mode
-        if self.COLOR_SCHEME_MODE == 1:
-            next_color_mode_bit = 0
-        elif self.COLOR_SCHEME_MODE == 2:
-            next_color_mode_bit = 1
-        elif self.COLOR_SCHEME_MODE == 3 or self.COLOR_SCHEME_MODE == 4:
-            next_color_mode_bit = 1 - self.current_color_mode
+        sticky_popups = [p for p in self.active_popups if p.is_sticky]
+        if sticky_popups: self.set_cooldown(); return
 
-        new_popup = TransparentPopup(data, self, next_color_mode_bit, self.COLOR_SCHEME_MODE)
-        self.current_color_mode = next_color_mode_bit
+        stationary_popup = next((p for p in reversed(self.active_popups) if not p.is_sticky and not getattr(p, 'is_sliding_out', False)), None)
+        if stationary_popup: stationary_popup.slide_out()
+
+        if self.COLOR_SCHEME_MODE in (3, 4): self.current_color_mode = 1 - self.current_color_mode
+        elif self.COLOR_SCHEME_MODE == 2: self.current_color_mode = 1
+        else: self.current_color_mode = 0
+
+        new_popup = TransparentPopup(data, self, self.current_color_mode, self.COLOR_SCHEME_MODE)
 
         new_popup.raise_()
         self.active_popups.append(new_popup)
@@ -334,27 +341,41 @@ class ClipboardMonitor(QApplication):
             self.calculate_total_size_async(data["paths"], new_popup, data["bottom_template"])
 
     def close_popup(self, popup):
-        if popup in self.active_popups: self.active_popups.remove(popup)
-        for anim_name in ['slide_anim', 'anim_group']:
-            try:
-                anim = getattr(popup, anim_name, None)
-                if anim and anim.state() == QPropertyAnimation.Running: anim.stop()
-            except RuntimeError: pass
-        for timer_name in ['lifecycle_timer', 'border_animation_timer', 'text_load_timer']:
+        if popup in self.active_popups:
+            self.active_popups.remove(popup)
+
+        if hasattr(popup, 'anim_group') and popup.anim_group is not None:
+            if popup.anim_group.state() == QAbstractAnimation.Running:
+                popup.anim_group.stop()
+            popup.anim_group.deleteLater()
+            popup.anim_group = None
+
+        if hasattr(popup, 'slide_anim') and popup.slide_anim is not None:
+            if popup.slide_anim.state() == QAbstractAnimation.Running:
+                popup.slide_anim.stop()
+            popup.slide_anim.deleteLater()
+            popup.slide_anim = None
+
+        # 【!!】 移除了 'preload_timer'
+        for timer_name in ['lifecycle_timer', 'border_animation_timer']:
             timer = getattr(popup, timer_name, None)
-            if timer: timer.stop()
-        popup.disconnect_scrollbar_signals(); popup.close()
+            if timer:
+                timer.stop()
+                timer.deleteLater()
+                setattr(popup, timer_name, None)
+
+        popup.disconnect_scrollbar_signals()
+        popup.close()
 
     def __del__(self):
-        if hasattr(self, 'executor'): self.executor.shutdown(wait=True)
+        if hasattr(self, 'executor'): self.executor.shutdown(wait=False)
 
 
-# --- v4.7.0 ---
+# --- TransparentPopup (已修改) ---
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 19
-    SCROLLBAR_WIDTH = 11
-    SCROLLBAR_MARGIN_RIGHT = 2
-    TEXT_LOAD_THRESHOLD_BYTES = 100 * 1024
+    SCROLLBAR_WIDTH, SCROLLBAR_MARGIN_RIGHT = 11, 2
+    CONTENT_AREA_MAX_HEIGHT, BOTTOM_AREA_MIN_HEIGHT = 162, 30
 
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{
@@ -378,19 +399,18 @@ class TransparentPopup(QWidget):
         super().__init__()
         self.monitor, self.color_mode, self.scheme_mode = monitor, color_mode, scheme_mode
         self.original_data = data
-
         self.is_sticky, self.border_thickness, self.border_dash_offset = False, 1, 0
+        self.saved_scroll_position = 0
         self.lifecycle_remaining, self.lifecycle_start_time = self.LIFECYCLE_SECONDS * 1000, None
-        self.full_text_to_load, self.text_load_timer = None, None
 
-        if self.original_data.get("type") == "text":
-            text_size = self.original_data.get("byte_size", 0)
-            if text_size >= self.TEXT_LOAD_THRESHOLD_BYTES:
-                self.full_text_to_load = self.original_data.get("top_text", "")
+        # 【!!】 移除了 is_large_content, text_snippet
+        self.full_text_to_load = self.original_data.get("full_text") # 用于 text/file 类型
 
-        self.bottom_background_color = QColor(Qt.transparent)
+        self.slide_anim = None
+        self.anim_group = None
+        # 【!!】 移除了 self.preload_timer = None
+        self.border_animation_timer = None
 
-        self.border_animation_timer = QTimer(self); self.border_animation_timer.timeout.connect(self.animate_border)
         self.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.FramelessWindowHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground); self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setFixedSize(222, 222)
@@ -401,7 +421,8 @@ class TransparentPopup(QWidget):
 
         self.setup_ui(); self.setup_colors_and_styles()
         self.target_screen_geom = self.get_current_screen_geometry()
-        self.move_to_initial_position(); self.show(); self.slide_in(); self.start_lifecycle()
+        self.move_to_initial_position(); self.show(); self.slide_in()
+        self.start_lifecycle()
         self.overlay_scrollbar.raise_()
 
     def setup_colors_and_styles(self):
@@ -413,93 +434,61 @@ class TransparentPopup(QWidget):
         gold_1_hex = "#8B4513"; bottom_style_1 = f"color: {gold_1_hex}; font-weight: bold; {common_bottom_style} background-color: transparent;"
         top_style_1 = f"color: rgb({text_1_qcolor.red()}, {text_1_qcolor.green()}, {text_1_qcolor.blue()});"
         scroll_handle_1 = "rgba(139, 69, 19, 204)"; highlight_1 = QColor(139, 69, 19, 191)
-
-        main_palette_index, bottom_palette_index = 0, 0
-        if self.scheme_mode == 1: main_palette_index, bottom_palette_index = 0, 0
-        elif self.scheme_mode == 2: main_palette_index, bottom_palette_index = 1, 1
-        elif self.scheme_mode == 3: main_palette_index, bottom_palette_index = self.color_mode, self.color_mode
-        elif self.scheme_mode == 4: main_palette_index, bottom_palette_index = self.color_mode, 1 - self.color_mode
-
-        if main_palette_index == 0:
-            self.background_color, self.text_color, self.border_color, top_text_style, self.scrollbar_handle_color, highlight_bg_color = \
-                bg_0, text_0, border_0, top_style_0, scroll_handle_0, highlight_0
-        else:
-            self.background_color, self.text_color, self.border_color, top_text_style, self.scrollbar_handle_color, highlight_bg_color = \
-                bg_1, text_1_qcolor, border_1, top_style_1, scroll_handle_1, highlight_1
-
-        if bottom_palette_index == 0: self.bottom_background_color, self.bottom_text_style = bg_0, bottom_style_0
-        else: self.bottom_background_color, self.bottom_text_style = bg_1, bottom_style_1
-
+        main_palette_index, bottom_palette_index = (self.color_mode, 1 - self.color_mode) if self.scheme_mode == 4 else (self.color_mode, self.color_mode) if self.scheme_mode == 3 else (1,1) if self.scheme_mode == 2 else (0,0)
+        self.background_color, _, self.border_color, top_text_style, self.scrollbar_handle_color, highlight_bg_color = (bg_0, text_0, border_0, top_style_0, scroll_handle_0, highlight_0) if main_palette_index == 0 else (bg_1, text_1_qcolor, border_1, top_style_1, scroll_handle_1, highlight_1)
+        self.bottom_background_color, self.bottom_text_style = (bg_0, bottom_style_0) if bottom_palette_index == 0 else (bg_1, bottom_style_1)
         self.bottom_message_label.setStyleSheet(self.bottom_text_style)
-        # --- MODIFIED: v4.7.0 (为两个控件分别设置样式) ---
-        self.top_content_label.setStyleSheet(top_text_style)
-        self.top_content_edit.setStyleSheet(f"QTextEdit {{ border: none; background-color: transparent; padding: 0; {top_text_style} }}")
-        # --- 修改结束 ---
+        self.top_content.setStyleSheet(f"QTextEdit {{ border: none; background-color: transparent; padding: 0; {top_text_style} }}")
+        self.overlay_scrollbar.setStyleSheet(self.OVERLAY_SCROLLBAR_STYLE_SHEET.format(width=self.SCROLLBAR_WIDTH, handle_color=self.scrollbar_handle_color))
+        palette = self.top_content.palette(); palette.setColor(QPalette.Highlight, highlight_bg_color); palette.setColor(QPalette.HighlightedText, Qt.white); self.top_content.setPalette(palette)
 
-        scroll_style = self.OVERLAY_SCROLLBAR_STYLE_SHEET.format(width=self.SCROLLBAR_WIDTH, handle_color=self.scrollbar_handle_color)
-        self.overlay_scrollbar.setStyleSheet(scroll_style)
-
-        palette = self.top_content_edit.palette()
-        palette.setColor(QPalette.Highlight, highlight_bg_color); palette.setColor(QPalette.HighlightedText, QColor(Qt.white))
-        self.top_content_edit.setPalette(palette)
-
-    # --- MODIFIED: v4.7.0 (懒加载 UI 设置) ---
     def setup_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(10)
         font = QFont("Consolas", 11); font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"])
 
-        # 1. 创建 QLabel (初始显示)
-        self.top_content_label = QLabel(self.original_data.get("top_text"))
-        self.top_content_label.setFont(font)
-        self.top_content_label.setTextFormat(Qt.PlainText)
-        self.top_content_label.setWordWrap(True)
-        self.top_content_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.top_content_label.setMaximumHeight(162)
+        self.top_content = StickyTextEdit(self); self.top_content.popup = self
 
-        # 2. 创建 QTextEdit (置顶后显示)
-        self.top_content_edit = StickyTextEdit(self); self.top_content_edit.popup = self
-        self.top_content_edit.setReadOnly(True); self.top_content_edit.setTextInteractionFlags(Qt.NoTextInteraction)
-        self.top_content_edit.setFont(font); self.top_content_edit.setWordWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
-        self.top_content_edit.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.top_content_edit.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.top_content_edit.setMaximumHeight(162)
-        self.top_content_edit.setViewportMargins(0, 0, 0, 0)
-        self.top_content_edit.internal_copy_triggered.connect(self.monitor.play_random_sound)
-        self.top_content_edit.hide() # 默认隐藏
+        # 【!!】 立即加载完整内容
+        initial_text = self.full_text_to_load
+        if initial_text is None:
+            # 对于非 text/file 类型 (image, other, clear)，使用 top_text_snippet
+            initial_text = self.original_data.get("top_text_snippet", "")
+        self.top_content.setPlainText(initial_text)
 
-        # 3. 创建底部消息区
+        self.top_content.setReadOnly(True); self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.top_content.setFont(font)
+        self.top_content.setWordWrapMode(QTextOption.WrapAnywhere)
+        self.top_content.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff); self.top_content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.top_content.internal_copy_triggered.connect(self.monitor.play_random_sound)
+        self.top_content.setMaximumHeight(self.CONTENT_AREA_MAX_HEIGHT)
+
         self.bottom_message_label = QLabel(self.original_data.get("bottom_text", ""))
-        self.bottom_message_label.setFont(font)
-        self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft);
-        self.bottom_message_label.setTextFormat(Qt.PlainText)
+        self.bottom_message_label.setFont(font); self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft);
         self.bottom_message_label.installEventFilter(self)
+        self.bottom_message_label.setMinimumHeight(self.BOTTOM_AREA_MIN_HEIGHT)
 
-        # 4. 加入布局
-        layout.addWidget(self.top_content_label)
-        layout.addWidget(self.top_content_edit)
-        layout.addStretch()
+        layout.addWidget(self.top_content)
         layout.addWidget(self.bottom_message_label)
-    # --- 修改结束 ---
+        layout.setStretch(0, 1)
+        layout.setStretch(1, 0)
 
-    def load_full_text(self):
-        if self.full_text_to_load is None: return
-        try:
-            self.top_content_edit.setPlainText(self.full_text_to_load); self.full_text_to_load = None
-            if self.is_sticky: QTimer.singleShot(0, self.update_overlay_scrollbar)
-        except RuntimeError: pass
+    # 【!!】 移除了 preload_full_text 整个函数
 
     def resizeEvent(self, event):
+        # 【保留 v4.9.2 - FIX 1】
         super().resizeEvent(event)
+        content_rect = self.top_content.geometry()
         x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
-        y = self.border_thickness
-        height = self.bottom_message_label.y() - self.border_thickness
+        y = content_rect.y()
+        height = content_rect.height()
         self.overlay_scrollbar.setGeometry(int(x), int(y), int(self.SCROLLBAR_WIDTH), int(height))
 
     def update_overlay_scrollbar(self):
-        doc_height = self.top_content_edit.document().size().height()
-        viewport_height = self.bottom_message_label.y() - self.border_thickness
+        doc_height = self.top_content.document().size().height()
+        viewport_height = self.top_content.height()
         if doc_height > viewport_height:
-            self.resizeEvent(None); v_scrollbar = self.top_content_edit.verticalScrollBar()
+            v_scrollbar = self.top_content.verticalScrollBar()
             self.overlay_scrollbar.setRange(v_scrollbar.minimum(), v_scrollbar.maximum())
             self.overlay_scrollbar.setPageStep(int(viewport_height)); v_scrollbar.setPageStep(int(viewport_height))
             self.overlay_scrollbar.setValue(v_scrollbar.value())
@@ -510,9 +499,9 @@ class TransparentPopup(QWidget):
     def connect_scrollbar_signals(self):
         if not self.is_scrollbar_connected:
             try:
-                self.overlay_scrollbar.valueChanged.connect(self.top_content_edit.verticalScrollBar().setValue)
-                self.top_content_edit.verticalScrollBar().valueChanged.connect(self.overlay_scrollbar.setValue)
-                self.top_content_edit.verticalScrollBar().rangeChanged.connect(self.overlay_scrollbar.setRange)
+                self.overlay_scrollbar.valueChanged.connect(self.top_content.verticalScrollBar().setValue)
+                self.top_content.verticalScrollBar().valueChanged.connect(self.overlay_scrollbar.setValue)
+                self.top_content.verticalScrollBar().rangeChanged.connect(self.overlay_scrollbar.setRange)
                 self.is_scrollbar_connected = True
             except RuntimeError: pass
 
@@ -520,10 +509,10 @@ class TransparentPopup(QWidget):
         if self.is_scrollbar_connected:
             try:
                 self.overlay_scrollbar.valueChanged.disconnect()
-                self.top_content_edit.verticalScrollBar().valueChanged.disconnect()
-                self.top_content_edit.verticalScrollBar().rangeChanged.disconnect()
-                self.is_scrollbar_connected = False
-            except RuntimeError: pass
+                self.top_content.verticalScrollBar().valueChanged.disconnect()
+                self.top_content.verticalScrollBar().rangeChanged.disconnect()
+            except (TypeError, RuntimeError): pass
+            finally: self.is_scrollbar_connected = False
 
     def eventFilter(self, obj, event):
         if obj == self.bottom_message_label and event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
@@ -532,25 +521,12 @@ class TransparentPopup(QWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            geom_scrollbar = self.overlay_scrollbar.geometry() if self.overlay_scrollbar.isVisible() else QRect()
-            geom_message = self.bottom_message_label.geometry()
-            # --- MODIFIED: v4.7.0 (根据当前可见控件判断) ---
-            visible_content = self.top_content_edit if self.is_sticky else self.top_content_label
-            geom_content = visible_content.geometry()
-            # --- 修改结束 ---
-            click_pos = event.pos()
-            is_on_scrollbar = geom_scrollbar.contains(click_pos)
-            is_on_message = geom_message.contains(click_pos)
-            if is_on_scrollbar or is_on_message:
-                super().mousePressEvent(event)
-                return
-            is_on_content = geom_content.contains(click_pos)
-            if is_on_content:
-                if self.is_sticky: super().mousePressEvent(event)
-                else: self.slide_out()
-                return
-            if not self.is_sticky: self.slide_out()
-            return
+            is_on_scrollbar = self.overlay_scrollbar.isVisible() and self.overlay_scrollbar.geometry().contains(event.pos())
+            is_on_message = self.bottom_message_label.geometry().contains(event.pos())
+
+            # 【!!】 现在的默认模式可以滚动，但点击非按钮区域依然会消失
+            if not is_on_scrollbar and not is_on_message and not self.is_sticky:
+                self.slide_out()
         super().mousePressEvent(event)
 
     def get_current_screen_geometry(self):
@@ -567,77 +543,76 @@ class TransparentPopup(QWidget):
         if self.is_sticky: self.activate_sticky_mode()
         else: self.deactivate_sticky_mode()
 
-    # --- MODIFIED: v4.7.0 (激活置顶模式 = 加载 QTextEdit) ---
     def activate_sticky_mode(self):
         if self.lifecycle_timer.isActive():
             self.lifecycle_timer.stop(); self.lifecycle_remaining = max(0, self.lifecycle_remaining - self.lifecycle_start_time.msecsTo(QTime.currentTime()))
-        self.border_thickness = 2; self.border_animation_timer.start(51)
+        self.border_thickness = 2
+        if not self.border_animation_timer:
+            self.border_animation_timer = QTimer(self)
+            self.border_animation_timer.timeout.connect(self.animate_border)
+        self.border_animation_timer.start(51)
 
-        # 切换控件可见性
-        self.top_content_label.hide()
-        self.top_content_edit.show()
+        self.top_content.setReadOnly(False)
+        self.top_content.setTextInteractionFlags(Qt.TextEditorInteraction)
 
-        # 加载完整内容到 QTextEdit
-        if self.full_text_to_load is not None:
-            self.top_content_edit.setPlainText("●")
-            self.text_load_timer = QTimer(self); self.text_load_timer.setSingleShot(True)
-            self.text_load_timer.timeout.connect(self.load_full_text); self.text_load_timer.start(10)
-        else:
-            self.top_content_edit.setPlainText(self.original_data.get("top_text"))
-            QTimer.singleShot(0, self.update_overlay_scrollbar)
+        # 【保留 v4.9.2 - FIX 2】
+        self.top_content.verticalScrollBar().setValue(self.saved_scroll_position)
 
-        # 设置 QTextEdit 属性
-        self.top_content_edit.setReadOnly(False); self.top_content_edit.setTextInteractionFlags(Qt.TextEditorInteraction)
-        self.top_content_edit.horizontalScrollBar().setRange(0, 0); self.top_content_edit.setMaximumHeight(10000)
-        self.top_content_edit.verticalScrollBar().setValue(0)
-        self.top_content_edit.textChanged.connect(self.update_overlay_scrollbar)
-        self.top_content_edit.setFocus(Qt.MouseFocusReason)
+        self.top_content.textChanged.connect(self.update_overlay_scrollbar)
+        self.top_content.setFocus(Qt.MouseFocusReason)
+
+        # 【!!】 文本已是完整的，无需等待加载，直接更新滚动条
+        QTimer.singleShot(0, self.update_overlay_scrollbar)
         self.update()
-    # --- 修改结束 ---
 
-    # --- MODIFIED: v4.7.0 (取消置顶 = 切回 QLabel 并释放资源) ---
     def deactivate_sticky_mode(self):
+        # 【保留 v4.9.2 - FIX 2】
+        self.saved_scroll_position = self.top_content.verticalScrollBar().value()
+
         if self.lifecycle_remaining > 0: self.start_lifecycle()
-        self.border_animation_timer.stop(); self.border_dash_offset = 0; self.border_thickness = 1
-
-        # 清空并隐藏 QTextEdit
-        try: self.top_content_edit.textChanged.disconnect(self.update_overlay_scrollbar)
+        if self.border_animation_timer and self.border_animation_timer.isActive():
+            self.border_animation_timer.stop()
+        self.border_dash_offset = 0; self.border_thickness = 1
+        try: self.top_content.textChanged.disconnect(self.update_overlay_scrollbar)
         except (TypeError, RuntimeError): pass
-        self.top_content_edit.setPlainText("") # 释放内存
-        cursor = self.top_content_edit.textCursor(); cursor.clearSelection(); self.top_content_edit.setTextCursor(cursor)
-        self.top_content_edit.setReadOnly(True); self.top_content_edit.setTextInteractionFlags(Qt.NoTextInteraction)
-        self.top_content_edit.setMaximumHeight(162)
-        self.top_content_edit.hide()
 
-        # 隐藏滚动条并显示 QLabel
+        cursor = self.top_content.textCursor(); cursor.clearSelection(); self.top_content.setTextCursor(cursor)
+        self.top_content.setReadOnly(True)
+        self.top_content.setTextInteractionFlags(Qt.NoTextInteraction)
+
+        # 【保留 v4.9.2 - FIX 2】
+        self.top_content.verticalScrollBar().setValue(self.saved_scroll_position)
+
         self.overlay_scrollbar.hide(); self.disconnect_scrollbar_signals()
-        self.top_content_label.show()
-
         self.update()
-    # --- 修改结束 ---
 
     def animate_border(self):
         self.border_dash_offset = (self.border_dash_offset - 1) % -10; self.update()
 
     def slide_out(self):
-        for timer in [self.lifecycle_timer, self.border_animation_timer, getattr(self, 'text_load_timer', None)]:
-            if timer: timer.stop()
-        if hasattr(self, 'is_sliding_out') and self.is_sliding_out: return
+        # 【!!】 移除了 preload_timer
+        for timer in [self.lifecycle_timer, self.border_animation_timer]:
+            if timer and timer.isActive(): timer.stop()
+        if getattr(self, 'is_sliding_out', False): return
         self.is_sliding_out = True
-        anim_group = QParallelAnimationGroup(self)
+        self.anim_group = QParallelAnimationGroup(self)
         opacity_anim = QPropertyAnimation(self, b"windowOpacity"); opacity_anim.setDuration(self.SLIDE_OUT_DURATION); opacity_anim.setEndValue(0.0)
         pos_anim = QPropertyAnimation(self, b"pos"); pos_anim.setDuration(self.SLIDE_OUT_DURATION); pos_anim.setEndValue(QPoint(self.x() - 80, self.y()))
-        anim_group.addAnimation(opacity_anim); anim_group.addAnimation(pos_anim)
-        anim_group.finished.connect(lambda: self.monitor.close_popup(self))
-        anim_group.start(QAbstractAnimation.DeleteWhenStopped); self.anim_group = anim_group
+        self.anim_group.addAnimation(opacity_anim); self.anim_group.addAnimation(pos_anim)
+        self.anim_group.finished.connect(lambda: self.monitor.close_popup(self))
+        self.anim_group.start()
 
     def move_to_initial_position(self):
         self.move(self.target_screen_geom.right(), self.target_screen_geom.bottom() - self.height() - 40)
 
     def slide_in(self):
         end_pos = QPoint(self.target_screen_geom.right() - self.width() - 40, self.y())
-        slide_anim = QPropertyAnimation(self, b"pos"); slide_anim.setDuration(self.SLIDE_IN_DURATION)
-        slide_anim.setEndValue(end_pos); slide_anim.start(QPropertyAnimation.DeleteWhenStopped); self.slide_anim = slide_anim
+        self.slide_anim = QPropertyAnimation(self, b"pos"); self.slide_anim.setDuration(self.SLIDE_IN_DURATION)
+        self.slide_anim.setEndValue(end_pos)
+        # 【!!】 移除了 finished.connect(self.start_preload_timer)
+        self.slide_anim.start()
+
+    # 【!!】 移除了 start_preload_timer 整个函数
 
     def update_bottom_text(self, text):
         self.bottom_message_label.setText(text)
@@ -646,17 +621,13 @@ class TransparentPopup(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         split_y = self.bottom_message_label.y()
-        top_rect = QRect(0, 0, self.width(), split_y)
-        painter.fillRect(top_rect, self.background_color)
-        bottom_rect = QRect(0, split_y, self.width(), self.height() - split_y)
-        painter.fillRect(bottom_rect, self.bottom_background_color)
+        painter.fillRect(QRect(0, 0, self.width(), split_y), self.background_color)
+        painter.fillRect(QRect(0, split_y, self.width(), self.height() - split_y), self.bottom_background_color)
         pen = QPen(self.border_color, self.border_thickness, Qt.DashLine)
-        if self.is_sticky:
-            pen.setDashOffset(self.border_dash_offset)
+        if self.is_sticky: pen.setDashOffset(self.border_dash_offset)
         painter.setPen(pen)
         adj = self.border_thickness / 2.0
-        draw_rect = self.rect().adjusted(int(adj), int(adj), -int(adj), -int(adj))
-        painter.drawRect(draw_rect)
+        painter.drawRect(self.rect().adjusted(int(adj), int(adj), -int(adj), -int(adj)))
 
 
 if __name__ == "__main__":
@@ -666,5 +637,6 @@ if __name__ == "__main__":
     db = QFontDatabase(); print(sorted(list(set(QFont(name).family() for name in db.families()))))
     print("="*63)
     signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
-    timer = QTimer(); timer.start(50); timer.timeout.connect(lambda: None)
+    timer = QTimer(); timer.start(500); timer.timeout.connect(lambda: None)
     sys.exit(app.exec_())
+```
