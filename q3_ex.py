@@ -318,10 +318,7 @@ class ClipboardMonitor(QApplication):
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 119
     SCROLLBAR_WIDTH, SCROLLBAR_MARGIN_RIGHT = 11, 2
-    CONTENT_AREA_MAX_HEIGHT, BOTTOM_AREA_MIN_HEIGHT = 177, 15
-
-    # CONTENT_AREA_MAX_HEIGHT, BOTTOM_AREA_MIN_HEIGHT = 162, 30 关于怎样改区域面积 不要删
-
+    CONTENT_AREA_MAX_HEIGHT, BOTTOM_AREA_MIN_HEIGHT = 162, 30
 
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{
@@ -403,7 +400,7 @@ class TransparentPopup(QWidget):
     # (v4.9.30) - 无改动
     def setup_ui(self):
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 5, 10, 10); layout.setSpacing(0)
+        layout.setContentsMargins(10, 10, 10, 10); layout.setSpacing(10)
         font = QFont("Consolas", 11); font.setFamilies(["Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"])
 
         self.top_content = StickyTextEdit(self); self.top_content.popup = self
@@ -445,10 +442,10 @@ class TransparentPopup(QWidget):
                 color: #000000;
             }
             QPushButton:hover {
-                background-color: rgba(255, 150, 150, 220);
+                background-color: rgba(200, 200, 255, 220);
             }
             QPushButton:pressed {
-                background-color: rgba(255, 100, 100, 240);
+                background-color: rgba(150, 150, 255, 240);
             }
         """)
         self.z_button.clicked.connect(self.toggle_sticky_mode)
@@ -615,19 +612,7 @@ class TransparentPopup(QWidget):
         self.slide_anim = QPropertyAnimation(self, b"pos"); self.slide_anim.setDuration(self.SLIDE_IN_DURATION)
         self.slide_anim.setEndValue(end_pos); self.slide_anim.start()
 
-    def update_bottom_text(self, text):
-        self.bottom_message_label.setText(text)
-        # 确保Z按钮覆盖整个Z区域，特别是在文件类型异步更新文本后
-        if hasattr(self, 'bottom_message_label') and self.bottom_message_label is not None:
-            split_y = self.bottom_message_label.y()
-            z_zone_rect = QRect(0, split_y, self.width(), self.height() - split_y)
-            if hasattr(self, 'z_button') and self.z_button is not None:
-                self.z_button.setGeometry(
-                    z_zone_rect.x(),
-                    z_zone_rect.y(),
-                    z_zone_rect.width(),
-                    z_zone_rect.height()
-                )
+    def update_bottom_text(self, text): self.bottom_message_label.setText(text)
     def paintEvent(self, event):
         painter = QPainter(self); painter.setRenderHint(QPainter.Antialiasing)
         split_y = self.bottom_message_label.y()

@@ -1,0 +1,16 @@
+{
+  "name": "kope",
+  "version": "1.0.0",
+  "description": "剪贴板监控工具 - Node.js Electron版本",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["clipboard", "monitor", "electron"],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "electron": "^38.4.0"
+  }
+}

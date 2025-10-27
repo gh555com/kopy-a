@@ -1,0 +1,226 @@
+/* style.css - 样式与动画 */
+body, html {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: "Consolas", "monospace", "LXGW WenKai GB Screen", "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial";
+    font-size: 11pt;
+}
+
+#popup-container {
+    width: 222px;
+    height: 222px;
+    box-sizing: border-box; /* 边框和内边距包含在宽高内 */
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+
+    /* 对应 paintEvent 的边框绘制 */
+    border: 1px solid white;
+
+    /* 初始完全可见 */
+    transform: translateX(0);
+    opacity: 1;
+}
+
+/* 滑入滑出动画 */
+#popup-container.slide-in {
+    transform: translateX(80px);
+    opacity: 0;
+    animation: slide-in 0.3s ease-out forwards;
+}
+
+@keyframes slide-in {
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+#popup-container.slide-out {
+    animation: slide-out 0.3s ease-out forwards;
+}
+
+@keyframes slide-out {
+    to {
+        transform: translateX(-80px);
+        opacity: 0;
+    }
+}
+
+
+/* --- 颜色主题 --- */
+/* 暗色主题 */
+#popup-container.dark-theme {
+    background-color: rgba(0, 0, 0, 0.94);
+    border-color: white;
+    color: white;
+}
+#popup-container.dark-theme #top-content {
+    color: #ffffff;
+}
+#popup-container.dark-theme #bottom-message {
+    background-color: rgba(0, 0, 0, 0.94);
+    color: #cd853f;
+}
+#popup-container.dark-theme #top-content::-webkit-scrollbar-thumb {
+    background-color: rgba(205, 133, 63, 0.8);
+}
+
+/* 亮色主题 */
+#popup-container.light-theme {
+    background-color: rgba(253, 246, 227, 0.98);
+    border-color: rgb(55, 45, 15);
+    color: rgb(3, 2, 1);
+}
+#popup-container.light-theme #top-content {
+    color: rgb(3, 2, 1);
+}
+#popup-container.light-theme #bottom-message {
+    background-color: rgba(253, 246, 227, 0.98);
+    color: #8B4513;
+    font-weight: bold;
+}
+#popup-container.light-theme #top-content::-webkit-scrollbar-thumb {
+    background-color: rgba(139, 69, 19, 0.8);
+}
+
+/* --- 粘滞模式样式 --- */
+#popup-container.sticky {
+    border-width: 2px;
+    border-style: dashed;
+    animation: dash-animation 0.5s linear infinite;
+}
+
+/* 粘滞模式下显示滚动条 */
+#popup-container.sticky #overlay-scrollbar {
+    display: block !important;
+}
+
+/* 虚线动画背景 */
+@keyframes dash-animation {
+    to {
+        background-position: -10px 0;
+    }
+}
+
+/* 确保虚线边框可见 */
+#popup-container.dark-theme.sticky {
+    border-color: #cd853f;
+}
+
+#popup-container.light-theme.sticky {
+    border-color: #8B4513;
+}
+
+
+/* --- 布局和内部组件 --- */
+#top-content {
+    flex-grow: 1;
+    padding: 10px 10px 0 10px;
+    box-sizing: border-box;
+    overflow-y: auto; /* 自动显示滚动条 */
+    word-wrap: break-word;
+    white-space: pre-wrap;
+    height: 162px; /* 固定高度 */
+}
+
+/* 自定义滚动条 (对应 OverlayScrollbar) */
+#overlay-scrollbar {
+    position: absolute;
+    right: 0;
+    top: 0;
+    width: 11px;
+    height: 162px; /* 与top-content高度相同 */
+    display: block; /* 默认显示滚动条 */
+    z-index: 10;
+}
+
+#scrollbar-thumb {
+    position: absolute;
+    right: 0;
+    width: 11px;
+    min-height: 30px;
+    background-color: rgba(205, 133, 63, 0.8);
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#top-content::-webkit-scrollbar {
+    width: 11px;
+}
+#top-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+#top-content::-webkit-scrollbar-thumb {
+    background-color: rgba(205, 133, 63, 0.8);
+    border-radius: 5px;
+}
+.theme-dark #top-content::-webkit-scrollbar-thumb {
+    background-color: rgba(205, 133, 63, 0.8);
+}
+.theme-light #top-content::-webkit-scrollbar-thumb {
+    background-color: rgba(139, 69, 19, 0.8);
+}
+/* 文本选中颜色 */
+.theme-dark #top-content::selection {
+    background: #cd853f; color: white;
+}
+.theme-light #top-content::selection {
+    background: rgba(139, 69, 19, 0.75); color: white;
+}
+
+#bottom-message {
+    height: 30px; /* 固定高度 */
+    min-height: 30px;
+    padding: 8px 10px 10px 10px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: flex-end;
+}
+
+/* 冷却时间指示条 */
+#cooldown-indicator {
+    height: 3px;
+    width: 100%;
+    background-color: rgba(255, 255, 255, 0.2);
+    position: relative;
+    overflow: hidden;
+}
+
+#cooldown-indicator .progress {
+    height: 100%;
+    background-color: #cd853f;
+    width: 0%;
+    transition: width 0.1s linear;
+}
+
+#popup-container.light-theme #cooldown-indicator .progress {
+    background-color: #8B4513;
+}
+
+/* 交互屏蔽层 (Q区) 和 Z区 */
+#interaction-shield, #z-click-area {
+    position: absolute;
+    left: 0;
+    width: 100%;
+    cursor: default;
+}
+#interaction-shield {
+    top: 0;
+    height: calc(100% - 40px); /* 覆盖 top-content 区域 */
+    background-color: transparent;
+}
+#z-click-area {
+    bottom: 0;
+    height: 40px; /* 覆盖 bottom-message 区域 */
+}
+#z-click-area.red {
+    background-color: rgba(255, 0, 0, 0.1);
+}
+#z-click-area.blue {
+    background-color: rgba(0, 0, 255, 0.1);
+}
