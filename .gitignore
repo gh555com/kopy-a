@@ -3,7 +3,13 @@ node_modules/
 dist/
 build/
 .cache/
-
+out/
+coverage/
+tmp/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # 日志文件
 *.log
@@ -12,8 +18,6 @@ E:/r/qqq.log
 # VSCode 设置
 
 # 构建输出
-out/
-dist/
 *.vsix
 
 # 操作系统文件
@@ -45,30 +49,9 @@ __pycache__/
 *.swp
 *.swo
 
-
-
-
-
-
-
- # 依赖与产物
-node_modules/
-dist/
-build/
-out/
-.cache/
-coverage/
-tmp/
-*.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
 # 环境与本地配置
 .env*
 !.env.example
-.DS_Store
-Thumbs.db
 
 # 包管理器锁（按你团队约定保留其一）
 # 如果用 pnpm，保留 pnpm-lock.yaml；不用就忽略它
