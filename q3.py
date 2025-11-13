@@ -1,6 +1,18 @@
-# q3.py (v4.9.33 - "The Miniaudio V15 Multi-Thread Engine")
+# q3.py (v4.9.35 - "Enhanced Unknown Type Detection")
 # -*- coding: utf-8 -*-
 """
+v4.9.35 版本特性:
+- 【未知类型检测增强】: 参考1.py，增强未知类型处理能力，特别是视频剪辑软件中的内容
+- 【格式过滤优化】: 扩展过滤的格式列表，排除更多Qt内部格式
+- 【文本内容显示】: 对未知类型尝试解码为UTF-8文本，可读文本直接显示内容
+- 【错误处理改进】: 增加异常处理，即使获取数据失败也能显示类型信息
+
+v4.9.34 版本特性:
+- 【URL显示优化】: URL文本原封不动显示在上部区域，不做任何截断
+- 【多URL处理】: 多个URL用换行符分隔，类似多文件显示
+- 【大小显示改进】: 小于1MB显示为"1026b(1k)"格式，大于等于1MB显示为"1026M(1G)"格式
+- 【URL类型处理】: 将URL作为文本类型处理，下部只显示大小
+
 v4.9.33 版本特性:
 - 【完全替换音频引擎】: 使用基于q2.py v15逻辑的miniaudio多线程非阻塞音频引擎
 - 【移除pygame依赖】: 完全移除pygame相关代码，使用纯miniaudio实现
@@ -190,11 +202,17 @@ class ClipboardMonitor(QApplication):
             if not urls: return None
             local_paths = [url.toLocalFile() for url in urls if url.isLocalFile() and os.path.exists(url.toLocalFile())]
             if not local_paths:
+                # 处理远程URL，像文本一样处理
                 remote_urls = [url for url in urls if not url.isLocalFile()]
                 if remote_urls:
-                    top_text = f"复制了 {len(remote_urls)} 个 URL"
-                    bottom_text = remote_urls[0].toString()[:50] + ("..." if len(remote_urls[0].toString()) > 50 else "")
-                    return {"type": "other", "top_text": top_text, "bottom_text": bottom_text, "top_text_snippet": top_text}
+                    # 将URL文本原封不动显示在上部区域，多个URL用换行符分隔
+                    url_texts = [url.toString() for url in remote_urls]
+                    full_text = "\n".join(url_texts)
+
+                    # 计算所有URL的总大小
+                    total_size = sum(len(url.toString().encode('utf-8', 'replace')) for url in remote_urls)
+
+                    return {"type": "text", "full_text": full_text, "bottom_text": self.format_size(total_size)}
                 return None
             count, num_files, num_folders = len(local_paths), sum(1 for p in local_paths if os.path.isfile(p)), sum(1 for p in local_paths if os.path.isdir(p))
             top_text = "\n".join([os.path.basename(p) for p in local_paths])
@@ -228,13 +246,47 @@ class ClipboardMonitor(QApplication):
             except Exception: data_size = len(text.encode('utf-8', 'replace'))
             bottom_text = self.format_size(data_size)
             return {"type": "text", "full_text": text, "bottom_text": bottom_text}
+        
+        # 增强未知类型处理逻辑，参考1.py的实现
         if all_formats:
-            filtered_formats = [f for f in all_formats if not f.startswith('application/x-qt-') and f not in ('text/plain', 'text/uri-list')]
-            primary_type = filtered_formats[0] if filtered_formats else all_formats[0]
+            # 排除Qt内部格式和已知格式，专注于未知内容
+            filtered_formats = [
+                f for f in all_formats
+                if not f.startswith('application/x-qt-')
+                and f not in ('text/plain', 'text/plain;charset=utf-8', 'text/uri-list', 
+                             'UTF8_STRING', 'COMPOUND_TEXT', 'TEXT', 'STRING', 'image/png')
+            ]
+            
+            # 如果有过滤后的格式，使用第一个；否则使用所有格式中的第一个
+            primary_type = None
+            if filtered_formats:
+                primary_type = filtered_formats[0]
+            elif all_formats:
+                primary_type = all_formats[0]
+                
             if primary_type:
-                if primary_type.startswith('application/x-qt-'): return None
-                data_size = mime_data.data(primary_type).size(); unknown_text = f"未知内容，类型: {primary_type}"
-                return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": self.format_size(data_size)}
+                # 获取数据并计算大小
+                try:
+                    byte_data = mime_data.data(primary_type)
+                    data_size = byte_data.size() if byte_data else 0
+                    
+                    # 尝试获取可读的文本表示
+                    try:
+                        text_data = byte_data.data().decode('utf-8', errors='replace')
+                        # 如果是可读文本且不太长，显示文本内容
+                        if len(text_data) > 0 and len(text_data) < 200:
+                            return {"type": "text", "full_text": text_data, "bottom_text": self.format_size(data_size)}
+                    except:
+                        pass
+                    
+                    # 否则显示为未知内容类型
+                    unknown_text = f"未知内容，类型: {primary_type}"
+                    return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": self.format_size(data_size)}
+                except Exception as e:
+                    # 如果获取数据失败，仍然尝试显示类型信息
+                    unknown_text = f"未知内容，类型: {primary_type}"
+                    return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": "大小未知"}
+        
         return {"type": "clear", "top_text": "剪贴板已清空", "top_text_snippet": "剪贴板已清空", "bottom_text": " "}
     # (v4.9.30 - 无改动)
     def calculate_total_size_async(self, file_paths, popup, template):
@@ -246,11 +298,18 @@ class ClipboardMonitor(QApplication):
     def on_calculation_finished(self, final_text, popup):
         if popup in self.active_popups: popup.update_bottom_text(final_text)
     def format_size(self, size_bytes):
-        if size_bytes is None: return "N/A"
-        if size_bytes < 1024: return f"{round(size_bytes)} b"
-        kb = size_bytes / 1024.0
-        if kb < 1024: return f"{round(kb)} K"
-        mb = kb / 1024.0; return f"{round(mb)} M"
+        if size_bytes < 0: return "未知大小"
+        if size_bytes < 1024: return f"{size_bytes}b"
+        if size_bytes < 1024 * 1024:  # 小于1MB
+            kb = int(size_bytes / 1024)
+            return f"{size_bytes}b ({kb}k)"
+        # 大于等于1MB
+        mb = int(size_bytes / (1024 * 1024))
+        if mb < 1024:  # 小于1GB
+            return f"{mb}M"
+        # 大于等于1GB
+        gb = int(size_bytes / (1024 * 1024 * 1024))
+        return f"{mb}M ({gb}G)"
     def set_cooldown(self):
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
