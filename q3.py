@@ -1,6 +1,17 @@
-# q3.py (v4.9.35 - "Enhanced Unknown Type Detection")
+# q3.py (v4.9.37 - "Enhanced Size Formatting")
 # -*- coding: utf-8 -*-
 """
+v4.9.37 版本特性:
+- 【尺寸格式化改进】: 使用逗号分隔千位数字，提高可读性
+- 【单位显示简化】: 移除k和g单位，只保留b和M两种单位
+- 【大小显示优化】: 小于1MB显示为"19,655b"格式，大于1MB显示为"2,222M"格式
+
+v4.9.36 版本特性:
+- 【剪贴板清空显示优化】: 清空剪贴板时显示空白内容和底部"0b"大小
+- 【清空音效固定】: 剪贴板清空时播放固定音效(8.wav)而非随机音效
+- 【空文本处理改进】: 空文本处理逻辑与清空剪贴板统一显示方式
+- 【音效播放增强】: 添加按类型和索引播放特定音效的功能
+
 v4.9.35 版本特性:
 - 【未知类型检测增强】: 参考1.py，增强未知类型处理能力，特别是视频剪辑软件中的内容
 - 【格式过滤优化】: 扩展过滤的格式列表，排除更多Qt内部格式
@@ -190,6 +201,10 @@ class ClipboardMonitor(QApplication):
     def play_z_sound(self):
         """使用基于v15逻辑的NonBlockingAudioEngine播放随机z音效"""
         self.audio_engine.play_z_sound()
+
+    def play_clear_sound(self):
+        """播放剪贴板清空时的固定音效（8.wav）"""
+        self.audio_engine.play_sound_index('main', 8)
     # --- (v4.9.33) 结结 ---
 
     # (v4.9.30 - 无改动)
@@ -241,35 +256,35 @@ class ClipboardMonitor(QApplication):
                 pass
         if mime_data.hasText():
             text = mime_data.text()
-            if not text: return {"type": "text", "full_text": "", "bottom_text": self.format_size(0)}
+            if not text: return {"type": "clear", "top_text": "", "top_text_snippet": "", "bottom_text": self.format_size(0)}
             try: data_size = mime_data.data('text/plain').size()
             except Exception: data_size = len(text.encode('utf-8', 'replace'))
             bottom_text = self.format_size(data_size)
             return {"type": "text", "full_text": text, "bottom_text": bottom_text}
-        
+
         # 增强未知类型处理逻辑，参考1.py的实现
         if all_formats:
             # 排除Qt内部格式和已知格式，专注于未知内容
             filtered_formats = [
                 f for f in all_formats
                 if not f.startswith('application/x-qt-')
-                and f not in ('text/plain', 'text/plain;charset=utf-8', 'text/uri-list', 
+                and f not in ('text/plain', 'text/plain;charset=utf-8', 'text/uri-list',
                              'UTF8_STRING', 'COMPOUND_TEXT', 'TEXT', 'STRING', 'image/png')
             ]
-            
+
             # 如果有过滤后的格式，使用第一个；否则使用所有格式中的第一个
             primary_type = None
             if filtered_formats:
                 primary_type = filtered_formats[0]
             elif all_formats:
                 primary_type = all_formats[0]
-                
+
             if primary_type:
                 # 获取数据并计算大小
                 try:
                     byte_data = mime_data.data(primary_type)
                     data_size = byte_data.size() if byte_data else 0
-                    
+
                     # 尝试获取可读的文本表示
                     try:
                         text_data = byte_data.data().decode('utf-8', errors='replace')
@@ -278,7 +293,7 @@ class ClipboardMonitor(QApplication):
                             return {"type": "text", "full_text": text_data, "bottom_text": self.format_size(data_size)}
                     except:
                         pass
-                    
+
                     # 否则显示为未知内容类型
                     unknown_text = f"未知内容，类型: {primary_type}"
                     return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": self.format_size(data_size)}
@@ -286,8 +301,8 @@ class ClipboardMonitor(QApplication):
                     # 如果获取数据失败，仍然尝试显示类型信息
                     unknown_text = f"未知内容，类型: {primary_type}"
                     return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": "大小未知"}
-        
-        return {"type": "clear", "top_text": "剪贴板已清空", "top_text_snippet": "剪贴板已清空", "bottom_text": " "}
+
+        return {"type": "clear", "top_text": "", "top_text_snippet": "", "bottom_text": self.format_size(0)}
     # (v4.9.30 - 无改动)
     def calculate_total_size_async(self, file_paths, popup, template):
         futures = [self.executor.submit(_get_path_size, path) for path in file_paths]
@@ -301,15 +316,11 @@ class ClipboardMonitor(QApplication):
         if size_bytes < 0: return "未知大小"
         if size_bytes < 1024: return f"{size_bytes}b"
         if size_bytes < 1024 * 1024:  # 小于1MB
-            kb = int(size_bytes / 1024)
-            return f"{size_bytes}b ({kb}k)"
-        # 大于等于1MB
-        mb = int(size_bytes / (1024 * 1024))
-        if mb < 1024:  # 小于1GB
-            return f"{mb}M"
-        # 大于等于1GB
-        gb = int(size_bytes / (1024 * 1024 * 1024))
-        return f"{mb}M ({gb}G)"
+            # 使用逗号分隔千位，只显示字节
+            return f"{size_bytes:,}b"
+        # 大于等于1MB，只显示MB单位，也使用逗号分隔千位
+        mb = size_bytes / (1024 * 1024)
+        return f"{mb:,.0f}M"
     def set_cooldown(self):
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
@@ -329,7 +340,11 @@ class ClipboardMonitor(QApplication):
 
         # (v4.9.33) - 立即播放音效，不等待界面切换
         # 直接调用音频引擎，不使用QTimer.singleShot避免额外延迟
-        self.play_random_sound()
+        # 如果是剪贴板清空情况，播放固定音效8.wav
+        if data.get("type") == "clear":
+            self.play_clear_sound()
+        else:
+            self.play_random_sound()
 
         sticky_popups = [p for p in self.active_popups if p.is_sticky]
         if sticky_popups:
