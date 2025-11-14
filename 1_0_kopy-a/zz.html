@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>纯文本故事</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- 配置Tailwind自定义样式 -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        text: '#333333',
+                        darkText: '#e5e7eb',
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'system-ui', 'sans-serif', 'SimSun'],
+                    },
+                }
+            }
+        }
+    </script>
+
+    <style type="text/tailwindcss">
+        @layer utilities {
+            .content-auto {
+                content-visibility: auto;
+            }
+        }
+    </style>
+
+    <!-- 自定义全局样式 -->
+    <style>
+        body {
+            transition: background-color 0.3s ease;
+        }
+
+        /* 隐藏滚动条但保留滚动功能（保持干净） */
+        ::-webkit-scrollbar {
+            width: 0;
+            height: 0;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-8 bg-white dark:bg-gray-900">
+    <!-- 中文故事（200字） -->
+    <div class="max-w-3xl mx-auto text-text dark:text-darkText font-sans text-lg leading-relaxed mb-12">
+        深山里的老木屋藏着时光的秘密。林夏踩着晨露推开吱呀作响的木门时，阳光正透
+    </div>
+
+    <!-- 英文故事（200字） -->
+    <div class="max-w-3xl mx-auto text-text dark:text-darkText font-sans text-lg leading-relaxed">
+        Clara found the old letter hidden in her grandmother’s attic trunk, its edges frayed by decades of silence. The handwriting was delicate, ink faded to a soft brown, telling of a young woman’s longing for her sweetheart during the war. As she read, Clara could almost hear the rustle of the 1940s wind through oak trees and the distant chime of the village church. The letter spoke of moonlit walks, shared laughter over crumpled newspapers, and promises to wait no matter how long. Toward the end, the writer’s hand trembled, words blending into each other—news of a missing soldier, a heartbroken plea for his safe return. Clara folded the letter gently, a tear slipping down her cheek. In that moment, the past and present intertwined, proving that love, even in written form, never truly fades. She placed the letter back, knowing it would remain a silent witness to a love that transcended time.
+    </div>
+
+    <script>
+        // 支持暗模式自动切换（跟随系统设置）
+        if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            document.documentElement.classList.add('dark');
+        }
+
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+            e.matches ? document.documentElement.classList.add('dark') : document.documentElement.classList.remove('dark');
+        });
+    </script>
+</body>
+</html>
