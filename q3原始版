@@ -1,15 +1,35 @@
-# q3.py (v4.9.39 - "Robust Fix Version")
+# q3.py (v4.9.37 - "Enhanced Size Formatting")
 # -*- coding: utf-8 -*-
 """
-v4.9.39 版本特性:
-- 【崩溃修复】: 修复了 close_popup 中使用 popup.close() 导致的 QObject 崩溃隐患 (替换为 deleteLater())。
-- 【健壮性I】: 移植了 q.py 中更健壮的 on_clipboard_changed 异常处理逻辑。
-- 【健壮性II】: 移植了 q.py 中的全局异常钩子 (sys.excepthook) 和安全启动逻辑。
-- 【健壮性III】: 移植了 q.py 中更完整的 __del__ 清理方法，确保安全退出。
+v4.9.37 版本特性:
+- 【尺寸格式化改进】: 使用逗号分隔千位数字，提高可读性
+- 【单位显示简化】: 移除k和g单位，只保留b和M两种单位
+- 【大小显示优化】: 小于1MB显示为"19,655b"格式，大于1MB显示为"2,222M"格式
 
-v4.9.38 版本特性:
-- 【PySide2迁移】: 完全从PyQt5迁移到PySide2 5.15.2.1
-... (v4.9.37 及之前特性不变) ...
+v4.9.36 版本特性:
+- 【剪贴板清空显示优化】: 清空剪贴板时显示空白内容和底部"0b"大小
+- 【清空音效固定】: 剪贴板清空时播放固定音效(8.wav)而非随机音效
+- 【空文本处理改进】: 空文本处理逻辑与清空剪贴板统一显示方式
+- 【音效播放增强】: 添加按类型和索引播放特定音效的功能
+
+v4.9.35 版本特性:
+- 【未知类型检测增强】: 参考1.py，增强未知类型处理能力，特别是视频剪辑软件中的内容
+- 【格式过滤优化】: 扩展过滤的格式列表，排除更多Qt内部格式
+- 【文本内容显示】: 对未知类型尝试解码为UTF-8文本，可读文本直接显示内容
+- 【错误处理改进】: 增加异常处理，即使获取数据失败也能显示类型信息
+
+v4.9.34 版本特性:
+- 【URL显示优化】: URL文本原封不动显示在上部区域，不做任何截断
+- 【多URL处理】: 多个URL用换行符分隔，类似多文件显示
+- 【大小显示改进】: 小于1MB显示为"1026b(1k)"格式，大于等于1MB显示为"1026M(1G)"格式
+- 【URL类型处理】: 将URL作为文本类型处理，下部只显示大小
+
+v4.9.33 版本特性:
+- 【完全替换音频引擎】: 使用基于q2.py v15逻辑的miniaudio多线程非阻塞音频引擎
+- 【移除pygame依赖】: 完全移除pygame相关代码，使用纯miniaudio实现
+- 【多线程并发】: 基于q1.py的多线程实现，支持多个音效同时播放
+- 【无延迟播放】: 使用miniaudio直接播放，实现0延迟音效反馈
+- 【资源管理】: 自动管理音频资源，避免内存泄漏
 """
 import sys
 import os
@@ -31,16 +51,15 @@ except ImportError:
     sys.exit(1)
 # --- (v4.9.33) 结束 ---
 
-from PySide2.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
+from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                              QTextEdit, QScrollBar, QStyleOptionSlider, QStyle, QPushButton)
-from PySide2.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, Signal, QBuffer,
+from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
                           QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl,
                           QEvent, QTime, QRect)
-from PySide2.QtGui import (QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
+# --- (v4.9.33) 核心改动：不再需要 QSoundEffect ---
+# from PyQt5.QtMultimedia import QSoundEffect  <-- 已移除
+from PyQt5.QtGui import (QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
                          QTextOption, QTextCursor, QKeySequence, QPalette, QPixmap, QImage)
-
-# 创建别名 Qaqqlication 指向 QApplication
-Qaqqlication = QApplication
 
 
 # --- (v4.9.30 - 无改动) ---
@@ -72,7 +91,7 @@ def _get_path_size(path):
 
 # --- (v4.9.30 - 无改动) ---
 class StickyTextEdit(QTextEdit):
-    internal_copy_triggered = Signal()
+    internal_copy_triggered = pyqtSignal()
     def __init__(self, parent=None):
         super().__init__(parent)
         self.popup = None; self.setAcceptDrops(True)
@@ -107,7 +126,7 @@ class ClickJumpScrollBar(QScrollBar):
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or self.press_pos.isNull():
             super().mouseReleaseEvent(event); return
-        moved = (event.pos() - self.press_pos).manhattanLength() > Qaqqlication.startDragDistance()
+        moved = (event.pos() - self.press_pos).manhattanLength() > QApplication.startDragDistance()
         click_pos = self.press_pos; self.press_pos = QPoint()
         if moved: super().mouseReleaseEvent(event); return
         opt = QStyleOptionSlider(); self.initStyleOption(opt)
@@ -129,20 +148,17 @@ class ClickJumpScrollBar(QScrollBar):
 
 
 # --- ClipboardMonitor (已修改 v4.9.32) ---
-class ClipboardMonitor(Qaqqlication):
-    calculation_done = Signal(str, QWidget)
+class ClipboardMonitor(QApplication):
+    calculation_done = pyqtSignal(str, QWidget)
     COLOR_SCHEME_MODE = 4; current_color_mode = 0; COOLDOWN_TIME_MS = 100
     def __init__(self, argv):
         super().__init__(argv)
 
         # --- (v4.9.33) 初始化基于v15逻辑的多线程非阻塞音频引擎 ---
-        self.audio_engine = None # v4.9.39 修复：确保 audio_engine 在失败时为 None
         try:
             self.audio_engine = NonBlockingAudioEngine()
-            print("音频引擎初始化成功") # v4.9.39 修复：移到 try 内部
         except Exception as e:
-            print(f"音频引擎初始化失败: {e}") # v4.9.39 修复：添加失败打印
-            print("程序将在没有音效的情况下继续运行")
+            pass
         # --- (v4.9.33) 结束 ---
 
         self.active_popups = []; self.is_on_cooldown = False
@@ -152,7 +168,7 @@ class ClipboardMonitor(Qaqqlication):
         try:
             self.setup_clipboard_monitor()
         except Exception as e:
-            pass # v4.9.39 修复：保持 q.py 的逻辑
+            pass
 
         self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 8)
         self.last_played_sound = None; self.last_played_q_sound = None; self.last_played_z_sound = None
@@ -167,64 +183,33 @@ class ClipboardMonitor(Qaqqlication):
     def setup_sound_files(self):
         """使用基于v15逻辑的NonBlockingAudioEngine加载所有音效"""
         # NonBlockingAudioEngine 已经在初始化时加载了所有音效文件
-        # v4.9.39 修复：添加 audio_engine 存在性检查
-        if self.audio_engine:
-            try:
-                print(f"成功预加载 {len(self.audio_engine.main_sounds)} 个原有音效 (miniaudio v15)。")
-                print(f"成功预加载 {len(self.audio_engine.q_sounds)} 个 q 系列音效 (miniaudio v15)。")
-                print(f"成功预加载 {len(self.audio_engine.z_sounds)} 个 z 系列音效 (miniaudio v15)。")
-            except Exception as e:
-                print(f"获取音效信息时出错: {e}")
-        else:
-            print("音频引擎未初始化，无法加载音效")
+        # 这里不需要额外操作，只是打印加载状态
+        print(f"成功预加载 {len(self.audio_engine.main_sounds)} 个原有音效 (miniaudio v15)。")
+        print(f"成功预加载 {len(self.audio_engine.q_sounds)} 个 q 系列音效 (miniaudio v15)。")
+        print(f"成功预加载 {len(self.audio_engine.z_sounds)} 个 z 系列音效 (miniaudio v15)。")
     # --- (v4.9.33) 结束 ---
 
     # --- (v4.9.33) 核心改动：重写音效播放 ---
-    # v4.9.39 修复：为所有播放函数添加 audio_engine 存在性检查和异常处理
     def play_random_sound(self):
         """使用基于v15逻辑的NonBlockingAudioEngine播放随机主音效"""
-        if self.audio_engine:
-            try:
-                self.audio_engine.play_random_sound()
-            except Exception as e:
-                print(f"播放随机音效时出错: {e}")
+        self.audio_engine.play_random_sound()
 
     def play_q_sound(self):
         """使用基于v15逻辑的NonBlockingAudioEngine播放随机q音效"""
-        if self.audio_engine:
-            try:
-                self.audio_engine.play_q_sound()
-            except Exception as e:
-                print(f"播放q音效时出错: {e}")
+        self.audio_engine.play_q_sound()
 
     def play_z_sound(self):
         """使用基于v15逻辑的NonBlockingAudioEngine播放随机z音效"""
-        if self.audio_engine:
-            try:
-                self.audio_engine.play_z_sound()
-            except Exception as e:
-                print(f"播放z音效时出错: {e}")
+        self.audio_engine.play_z_sound()
 
     def play_clear_sound(self):
         """播放剪贴板清空时的固定音效（8.wav）"""
-        if self.audio_engine:
-            try:
-                self.audio_engine.play_sound_index('main', 8)
-            except Exception as e:
-                print(f"播放清空音效时出错: {e}")
+        self.audio_engine.play_sound_index('main', 8)
     # --- (v4.9.33) 结结 ---
 
-    # (v4.9.39 - 健壮性修复)
+    # (v4.9.30 - 无改动)
     def setup_clipboard_monitor(self):
-        # 直接设置剪贴板监控，不使用延迟
-        try:
-            self.clipboard().dataChanged.connect(self.on_clipboard_changed)
-            print("剪贴板监控设置成功")
-        except Exception as e:
-            print(f"设置剪贴板监控时出错: {e}")
-            # 即使设置失败，也不应该退出程序
-
-    # (v4.9.38 - 保持不变)
+        self.clipboard().dataChanged.connect(self.on_clipboard_changed)
     def process_clipboard_data(self, mime_data):
         all_formats = mime_data.formats()
         if mime_data.hasUrls():
@@ -277,14 +262,17 @@ class ClipboardMonitor(Qaqqlication):
             bottom_text = self.format_size(data_size)
             return {"type": "text", "full_text": text, "bottom_text": bottom_text}
 
-        # 增强未知类型处理逻辑
+        # 增强未知类型处理逻辑，参考1.py的实现
         if all_formats:
+            # 排除Qt内部格式和已知格式，专注于未知内容
             filtered_formats = [
                 f for f in all_formats
                 if not f.startswith('application/x-qt-')
                 and f not in ('text/plain', 'text/plain;charset=utf-8', 'text/uri-list',
                              'UTF8_STRING', 'COMPOUND_TEXT', 'TEXT', 'STRING', 'image/png')
             ]
+
+            # 如果有过滤后的格式，使用第一个；否则使用所有格式中的第一个
             primary_type = None
             if filtered_formats:
                 primary_type = filtered_formats[0]
@@ -292,23 +280,29 @@ class ClipboardMonitor(Qaqqlication):
                 primary_type = all_formats[0]
 
             if primary_type:
+                # 获取数据并计算大小
                 try:
                     byte_data = mime_data.data(primary_type)
                     data_size = byte_data.size() if byte_data else 0
+
+                    # 尝试获取可读的文本表示
                     try:
                         text_data = byte_data.data().decode('utf-8', errors='replace')
+                        # 如果是可读文本且不太长，显示文本内容
                         if len(text_data) > 0 and len(text_data) < 200:
                             return {"type": "text", "full_text": text_data, "bottom_text": self.format_size(data_size)}
                     except:
                         pass
+
+                    # 否则显示为未知内容类型
                     unknown_text = f"未知内容，类型: {primary_type}"
                     return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": self.format_size(data_size)}
                 except Exception as e:
+                    # 如果获取数据失败，仍然尝试显示类型信息
                     unknown_text = f"未知内容，类型: {primary_type}"
                     return {"type": "other", "top_text": unknown_text, "top_text_snippet": unknown_text, "bottom_text": "大小未知"}
 
         return {"type": "clear", "top_text": "", "top_text_snippet": "", "bottom_text": self.format_size(0)}
-
     # (v4.9.30 - 无改动)
     def calculate_total_size_async(self, file_paths, popup, template):
         futures = [self.executor.submit(_get_path_size, path) for path in file_paths]
@@ -316,98 +310,57 @@ class ClipboardMonitor(Qaqqlication):
             total_size = sum(future.result() for future in futs if not future.exception())
             self.calculation_done.emit(template.format(self.format_size(total_size)), popup)
         self.executor.submit(aggregate_and_emit, futures)
-
     def on_calculation_finished(self, final_text, popup):
         if popup in self.active_popups: popup.update_bottom_text(final_text)
-
-    # (v4.9.37 - 保持不变)
     def format_size(self, size_bytes):
         if size_bytes < 0: return "未知大小"
         if size_bytes < 1024: return f"{size_bytes}b"
         if size_bytes < 1024 * 1024:  # 小于1MB
+            # 使用逗号分隔千位，只显示字节
             return f"{size_bytes:,}b"
-        # 大于等于1MB
+        # 大于等于1MB，只显示MB单位，也使用逗号分隔千位
         mb = size_bytes / (1024 * 1024)
         return f"{mb:,.0f}M"
-
     def set_cooldown(self):
         self.is_on_cooldown = True
         QTimer.singleShot(self.COOLDOWN_TIME_MS, lambda: setattr(self, 'is_on_cooldown', False))
-
-    # --- (v4.9.39 - 健壮性I：移植 q.py 的异常处理) ---
+    # (v4.9.30 - 无改动)
     def on_clipboard_changed(self):
         if self.is_on_cooldown:
             return
-
-        # 增强剪贴板访问的异常处理
-        mime_data = None
         try:
-            # 尝试获取剪贴板数据
-            clipboard = self.clipboard()
-            if clipboard:
-                mime_data = clipboard.mimeData()
-            else:
-                print("无法获取剪贴板对象")
-                self.set_cooldown()
-                return
+            mime_data = self.clipboard().mimeData()
         except Exception as e:
-            print(f"获取剪贴板数据时出错: {e}")
-            # 设置冷却时间，避免快速重复尝试
-            self.set_cooldown()
             return
-
         if not mime_data:
-            self.set_cooldown()
+            return
+        data = self.process_clipboard_data(mime_data)
+        if not data:
             return
 
-        try:
-            data = self.process_clipboard_data(mime_data)
-        except Exception as e:
-            print(f"处理剪贴板数据时出错: {e}")
-            # 不返回，继续尝试创建默认数据
-            data = {"type": "clear", "top_text": "", "top_text_snippet": "", "bottom_text": self.format_size(0)}
+        # (v4.9.33) - 立即播放音效，不等待界面切换
+        # 直接调用音频引擎，不使用QTimer.singleShot避免额外延迟
+        # 如果是剪贴板清空情况，播放固定音效8.wav
+        if data.get("type") == "clear":
+            self.play_clear_sound()
+        else:
+            self.play_random_sound()
 
-        if not data:
-            data = {"type": "clear", "top_text": "", "top_text_snippet": "", "bottom_text": self.format_size(0)}
-
-        try:
-            # (v4.9.33) - 立即播放音效
-            if data.get("type") == "clear":
-                self.play_clear_sound()
-            else:
-                self.play_random_sound()
-
-            sticky_popups = [p for p in self.active_popups if p.is_sticky]
-            if sticky_popups:
-                self.set_cooldown(); return
-            stationary_popup = next((p for p in reversed(self.active_popups) if not p.is_sticky and not getattr(p, 'is_sliding_out', False)), None)
-            if stationary_popup:
-                stationary_popup.slide_out()
-            if self.COLOR_SCHEME_MODE in (3, 4): self.current_color_mode = 1 - self.current_color_mode
-            elif self.COLOR_SCHEME_MODE == 2: self.current_color_mode = 1
-            else: self.current_color_mode = 0
-
-            try:
-                new_popup = TransparentPopup(data, self, self.current_color_mode, self.COLOR_SCHEME_MODE)
-                new_popup.raise_()
-                self.active_popups.append(new_popup)
-                self.set_cooldown()
-
-                if data.get("type") == "file" and "paths" in data:
-                    new_popup.update_bottom_text(data["bottom_template"].format("●"))
-                    self.calculate_total_size_async(data["paths"], new_popup, data["bottom_template"])
-            except Exception as e:
-                print(f"创建或初始化弹窗时出错: {e}")
-                # 即使创建弹窗失败，也设置冷却时间
-                self.set_cooldown()
-        except Exception as e:
-            print(f"处理剪贴板变化时发生未预期错误: {e}")
-            # 即使发生错误，也设置冷却时间
-            self.set_cooldown()
-            # 不退出程序，继续运行
-    # --- (v4.9.39 修复) ---
-
-    # --- (v4.9.39 - 崩溃修复) ---
+        sticky_popups = [p for p in self.active_popups if p.is_sticky]
+        if sticky_popups:
+            self.set_cooldown(); return
+        stationary_popup = next((p for p in reversed(self.active_popups) if not p.is_sticky and not getattr(p, 'is_sliding_out', False)), None)
+        if stationary_popup:
+            stationary_popup.slide_out()
+        if self.COLOR_SCHEME_MODE in (3, 4): self.current_color_mode = 1 - self.current_color_mode
+        elif self.COLOR_SCHEME_MODE == 2: self.current_color_mode = 1
+        else: self.current_color_mode = 0
+        new_popup = TransparentPopup(data, self, self.current_color_mode, self.COLOR_SCHEME_MODE)
+        new_popup.raise_(); self.active_popups.append(new_popup); self.set_cooldown()
+        if data.get("type") == "file" and "paths" in data:
+            new_popup.update_bottom_text(data["bottom_template"].format("●"))
+            self.calculate_total_size_async(data["paths"], new_popup, data["bottom_template"])
+    # (v4.9.30 - 无改动)
     def close_popup(self, popup):
         if popup in self.active_popups: self.active_popups.remove(popup)
         if hasattr(popup, 'anim_group') and popup.anim_group is not None:
@@ -419,66 +372,30 @@ class ClipboardMonitor(Qaqqlication):
         for timer_name in ['lifecycle_timer', 'border_animation_timer']:
             timer = getattr(popup, timer_name, None)
             if timer: timer.stop(); timer.deleteLater(); setattr(popup, timer_name, None)
+        popup.disconnect_scrollbar_signals(); popup.close()
 
-        # --- 核心修复 ---
-        # 使用 deleteLater() 替代 close() 来安全地删除 QWidget
-        popup.disconnect_scrollbar_signals()
-        popup.deleteLater()
-        # --- 修复结束 ---
-
-    # --- (v4.9.39 - 健壮性III：移植 q.py 的完整清理) ---
+    # --- (v4.9.33) 核心改动：添加清理 ---
     def __del__(self):
-        # 清理音频引擎资源
-        if hasattr(self, 'audio_engine') and self.audio_engine is not None:
-            try:
-                self.audio_engine.cleanup()
-            except Exception as e:
-                print(f"清理音频引擎时出错: {e}")
+        # 清理基于v15逻辑的多线程非阻塞音频引擎资源
+        if hasattr(self, 'audio_engine'):
+            self.audio_engine.cleanup()
 
-        # 清理线程池
         if hasattr(self, 'executor'):
-            try:
-                self.executor.shutdown(wait=False)
-            except Exception as e:
-                print(f"清理线程池时出错: {e}")
-
-        # 清理Qt对象
-        try:
-            # 断开所有信号连接
-            try:
-                self.calculation_done.disconnect()
-            except:
-                pass
-
-            # 清理活动弹窗
-            if hasattr(self, 'active_popups'):
-                for popup in self.active_popups:
-                    try:
-                        popup.close()
-                        popup.deleteLater()
-                    except:
-                        pass
-                self.active_popups.clear()
-
-            # 清理剪贴板连接
-            try:
-                clipboard = self.clipboard()
-                if clipboard:
-                    clipboard.dataChanged.disconnect(self.on_clipboard_changed)
-            except:
-                pass
-
-        except Exception as e:
-            print(f"清理Qt对象时出错: {e}")
-    # --- (v4.9.39 修复结束) ---
+            self.executor.shutdown(wait=False)
+    # --- (v4.9.33) 结束 ---
 # --- (v4.9.30 - 无改动) ---
 
 
 # --- TransparentPopup (v4.9.31 逻辑 - 无改动) ---
+# 这个类【不需要】知道 pygame 的存在
+# 它只需要调用 self.monitor.play_q_sound() 和 self.monitor.play_z_sound()
 class TransparentPopup(QWidget):
     SLIDE_IN_DURATION, SLIDE_OUT_DURATION, LIFECYCLE_SECONDS = 88, 88, 119
     SCROLLBAR_WIDTH, SCROLLBAR_MARGIN_RIGHT = 11, 2
     CONTENT_AREA_MAX_HEIGHT, BOTTOM_AREA_MIN_HEIGHT = 177, 15
+
+    # CONTENT_AREA_MAX_HEIGHT, BOTTOM_AREA_MIN_HEIGHT = 162, 30 关于怎样改区域面积 不要删
+
 
     OVERLAY_SCROLLBAR_STYLE_SHEET = """
         QScrollBar:vertical {{
@@ -499,7 +416,7 @@ class TransparentPopup(QWidget):
     """
 
     def get_current_screen_geometry(self):
-        return (Qaqqlication.screenAt(QCursor.pos()) or Qaqqlication.primaryScreen()).availableGeometry()
+        return (QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()).availableGeometry()
 
     def __init__(self, data, monitor, color_mode=0, scheme_mode=4):
         super().__init__()
@@ -520,16 +437,22 @@ class TransparentPopup(QWidget):
         self.is_scrollbar_connected = False
 
         self.interaction_shield = None
-        self.sticky_toggle_task_id = None
+        self.sticky_toggle_task_id = None  # 使用任务ID代替全局锁
 
+        # 初始化生命周期定时器
         self.lifecycle_timer = QTimer(self)
         self.lifecycle_timer.setSingleShot(True)
 
+        # 设置初始位置 - 使用当前屏幕几何信息
         self.target_screen_geom = self.get_current_screen_geometry()
+
+        # 设置UI和样式
         self.setup_ui()
         self.setup_colors_and_styles()
+
+        # 初始化显示
         self.move_to_initial_position()
-        self.show()
+        self.show()  # 确保弹窗显示
         self.slide_in()
         self.start_lifecycle()
 
@@ -585,6 +508,7 @@ class TransparentPopup(QWidget):
         self.interaction_shield.installEventFilter(self)
         self.interaction_shield.show()
 
+        # 添加Z区域按钮
         self.z_button = QPushButton("Z", self)
         self.z_button.setStyleSheet("""
             QPushButton {
@@ -624,6 +548,7 @@ class TransparentPopup(QWidget):
             split_y = self.bottom_message_label.y()
             z_zone_rect = QRect(0, split_y, self.width(), self.height() - split_y)
 
+            # 设置Z按钮覆盖整个Z区域
             if hasattr(self, 'z_button') and self.z_button is not None:
                 self.z_button.setGeometry(
                     z_zone_rect.x(),
@@ -663,20 +588,29 @@ class TransparentPopup(QWidget):
 
     def eventFilter(self, obj, event):
         if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+
+            # --- Q 区点击逻辑 (内容区) ---
             if obj == self.interaction_shield:
                 if not self.is_sticky:
+                    # (v4.9.33: 现在调用基于v15逻辑的miniaudio)
+                    # 直接调用音频引擎，不使用QTimer.singleShot避免额外延迟
                     self.monitor.play_q_sound()
                     self.slide_out()
                 return True
+
+        # --- 滚轮事件 (Q 区) ---
         if obj == self.interaction_shield and event.type() == QEvent.Wheel:
-            Qaqqlication.sendEvent(self.top_content.viewport(), event)
+            QApplication.sendEvent(self.top_content.viewport(), event)
             self.top_content.viewport().update()
             return True
+
         return super().eventFilter(obj, event)
 
     def play_z_sound_only(self):
+        """只播放z音效，不执行任何其他操作"""
         self.monitor.play_z_sound()
 
+    # (v4.9.30 - 无改动)
     def mousePressEvent(self, event): super().mousePressEvent(event)
     def start_lifecycle(self):
         self.lifecycle_timer = QTimer(self); self.lifecycle_timer.setSingleShot(True)
@@ -684,12 +618,17 @@ class TransparentPopup(QWidget):
         if not self.is_sticky:
             self.lifecycle_start_time = QTime.currentTime(); self.lifecycle_timer.start(self.lifecycle_remaining)
 
+    # (v4.9.30 - 无改动)
     def toggle_sticky_mode(self):
+        # 播放z音效
         self.monitor.play_z_sound()
+
+        # 切换粘滞模式
         self.is_sticky = not self.is_sticky
         if self.is_sticky: self.activate_sticky_mode()
         else: self.deactivate_sticky_mode()
 
+    # (v4.9.30 - 无改动)
     def activate_sticky_mode(self):
         if self.lifecycle_timer.isActive():
             self.lifecycle_timer.stop(); self.lifecycle_remaining = max(0, self.lifecycle_remaining - self.lifecycle_start_time.msecsTo(QTime.currentTime()))
@@ -704,6 +643,7 @@ class TransparentPopup(QWidget):
         self.top_content.setFocus(Qt.MouseFocusReason)
         self.update()
 
+    # (v4.9.31 逻辑 - 保持不变)
     def deactivate_sticky_mode(self):
         saved_v_scroll = self.top_content.verticalScrollBar().value()
         if self.lifecycle_remaining > 0: self.start_lifecycle()
@@ -719,10 +659,14 @@ class TransparentPopup(QWidget):
         self.overlay_scrollbar.hide(); self.disconnect_scrollbar_signals()
         self.interaction_shield.show()
         self.interaction_shield.raise_()
+
+        # (v4.9.31) 重置任务ID
         self.sticky_toggle_task_id = None
+
         QTimer.singleShot(0, lambda: self.top_content.verticalScrollBar().setValue(saved_v_scroll))
         self.update()
 
+    # (v4.9.30 - 无改动)
     def animate_border(self):
         self.border_dash_offset = (self.border_dash_offset - 1) % -10; self.update()
 
@@ -747,6 +691,7 @@ class TransparentPopup(QWidget):
 
     def update_bottom_text(self, text):
         self.bottom_message_label.setText(text)
+        # 确保Z按钮覆盖整个Z区域，特别是在文件类型异步更新文本后
         if hasattr(self, 'bottom_message_label') and self.bottom_message_label is not None:
             split_y = self.bottom_message_label.y()
             z_zone_rect = QRect(0, split_y, self.width(), self.height() - split_y)
@@ -769,41 +714,10 @@ class TransparentPopup(QWidget):
 # --- (v4.9.30 - 无改动) ---
 
 
-# --- (v4.9.39 - 健壮性II：移植 q.py 的全局异常处理) ---
+# --- (v4.9.30 - 无改动) ---
 if __name__ == "__main__":
-    # 添加全局异常处理，防止程序因未捕获的异常而退出
-    def handle_exception(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        print(f"未捕获的异常: {exc_type.__name__}: {exc_value}")
-        # 记录异常但不退出程序
-        import traceback
-        print("异常堆栈:")
-        traceback.print_tb(exc_traceback)
-
-    sys.excepthook = handle_exception
-
-    Qaqqlication.setAttribute(Qt.AA_EnableHighDpiScaling); Qaqqlication.setAttribute(Qt.AA_UseHighDpiPixmaps)
-
-    try:
-        app = ClipboardMonitor(sys.argv)
-        signal.signal(signal.SIGINT, lambda sig, frame: Qaqqlication.quit())
-        timer = QTimer(); timer.start(500); timer.timeout.connect(lambda: None)
-        # 使用sys.exit确保程序正常退出
-        sys.exit(app.exec_())
-    except Exception as e:
-        print(f"程序启动时出错: {e}")
-        import traceback
-        print("异常堆栈:")
-        traceback.print_exc()
-        # 即使启动失败，也尝试继续运行
-        try:
-            app = ClipboardMonitor(sys.argv)
-            signal.signal(signal.SIGINT, lambda sig, frame: Qaqqlication.quit())
-            timer = QTimer(); timer.start(500); timer.timeout.connect(lambda: None)
-            app.exec_()
-        except Exception as e2:
-            print(f"重试启动也失败: {e2}")
-            print("程序无法启动，请检查环境和依赖")
-# --- (v4.9.39 修复结束) ---
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling); QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    app = ClipboardMonitor(sys.argv)
+    signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
+    timer = QTimer(); timer.start(500); timer.timeout.connect(lambda: None)
+    sys.exit(app.exec_())
