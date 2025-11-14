@@ -1,6 +1,11 @@
-# q3.py (v4.9.37 - "Enhanced Size Formatting")
+# q3.py (v4.9.38 - "PySide2 Migration")
 # -*- coding: utf-8 -*-
 """
+v4.9.38 版本特性:
+- 【PySide2迁移】: 完全从PyQt5迁移到PySide2 5.15.2.1，使用免费库
+- 【信号系统更新】: 将pyqtSignal替换为PySide2的Signal
+- 【功能保持不变】: 所有原有功能保持完全不变，包括音频显示等特性
+
 v4.9.37 版本特性:
 - 【尺寸格式化改进】: 使用逗号分隔千位数字，提高可读性
 - 【单位显示简化】: 移除k和g单位，只保留b和M两种单位
@@ -51,15 +56,18 @@ except ImportError:
     sys.exit(1)
 # --- (v4.9.33) 结束 ---
 
-from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
+from PySide2.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                              QTextEdit, QScrollBar, QStyleOptionSlider, QStyle, QPushButton)
-from PyQt5.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, pyqtSignal, QBuffer,
+from PySide2.QtCore import (Qt, QTimer, QPoint, QPropertyAnimation, Signal, QBuffer,
                           QIODevice, QParallelAnimationGroup, QAbstractAnimation, QEasingCurve, QUrl,
                           QEvent, QTime, QRect)
 # --- (v4.9.33) 核心改动：不再需要 QSoundEffect ---
-# from PyQt5.QtMultimedia import QSoundEffect  <-- 已移除
-from PyQt5.QtGui import (QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
+# from PySide2.QtMultimedia import QSoundEffect  <-- 已移除
+from PySide2.QtGui import (QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
                          QTextOption, QTextCursor, QKeySequence, QPalette, QPixmap, QImage)
+
+# 创建别名 Qaqqlication 指向 QApplication
+Qaqqlication = QApplication
 
 
 # --- (v4.9.30 - 无改动) ---
@@ -91,7 +99,7 @@ def _get_path_size(path):
 
 # --- (v4.9.30 - 无改动) ---
 class StickyTextEdit(QTextEdit):
-    internal_copy_triggered = pyqtSignal()
+    internal_copy_triggered = Signal()
     def __init__(self, parent=None):
         super().__init__(parent)
         self.popup = None; self.setAcceptDrops(True)
@@ -126,7 +134,7 @@ class ClickJumpScrollBar(QScrollBar):
     def mouseReleaseEvent(self, event):
         if event.button() != Qt.LeftButton or self.press_pos.isNull():
             super().mouseReleaseEvent(event); return
-        moved = (event.pos() - self.press_pos).manhattanLength() > QApplication.startDragDistance()
+        moved = (event.pos() - self.press_pos).manhattanLength() > Qaqqlication.startDragDistance()
         click_pos = self.press_pos; self.press_pos = QPoint()
         if moved: super().mouseReleaseEvent(event); return
         opt = QStyleOptionSlider(); self.initStyleOption(opt)
@@ -148,8 +156,8 @@ class ClickJumpScrollBar(QScrollBar):
 
 
 # --- ClipboardMonitor (已修改 v4.9.32) ---
-class ClipboardMonitor(QApplication):
-    calculation_done = pyqtSignal(str, QWidget)
+class ClipboardMonitor(Qaqqlication):
+    calculation_done = Signal(str, QWidget)
     COLOR_SCHEME_MODE = 4; current_color_mode = 0; COOLDOWN_TIME_MS = 100
     def __init__(self, argv):
         super().__init__(argv)
@@ -416,7 +424,7 @@ class TransparentPopup(QWidget):
     """
 
     def get_current_screen_geometry(self):
-        return (QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()).availableGeometry()
+        return (Qaqqlication.screenAt(QCursor.pos()) or Qaqqlication.primaryScreen()).availableGeometry()
 
     def __init__(self, data, monitor, color_mode=0, scheme_mode=4):
         super().__init__()
@@ -600,7 +608,7 @@ class TransparentPopup(QWidget):
 
         # --- 滚轮事件 (Q 区) ---
         if obj == self.interaction_shield and event.type() == QEvent.Wheel:
-            QApplication.sendEvent(self.top_content.viewport(), event)
+            Qaqqlication.sendEvent(self.top_content.viewport(), event)
             self.top_content.viewport().update()
             return True
 
@@ -716,8 +724,8 @@ class TransparentPopup(QWidget):
 
 # --- (v4.9.30 - 无改动) ---
 if __name__ == "__main__":
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling); QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+    Qaqqlication.setAttribute(Qt.AA_EnableHighDpiScaling); Qaqqlication.setAttribute(Qt.AA_UseHighDpiPixmaps)
     app = ClipboardMonitor(sys.argv)
-    signal.signal(signal.SIGINT, lambda sig, frame: QApplication.quit())
+    signal.signal(signal.SIGINT, lambda sig, frame: Qaqqlication.quit())
     timer = QTimer(); timer.start(500); timer.timeout.connect(lambda: None)
     sys.exit(app.exec_())
