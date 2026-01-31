@@ -1,0 +1,62 @@
+# File: .gitignore
+# Node 依赖
+node_modules/
+
+
+
+.qoder/
+.vscode/
+.trae/
+.qoder/**
+
+
+# 日志文件
+*.log
+
+# VSCode 设置
+
+# 构建赢出
+out/
+dist/
+*.vsix
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 临时文件
+*.tmp
+*.temp
+*.bak
+*~
+
+# 测试文件
+test-config-fix.js
+
+# 配置文件（个人配置）
+E:/r/pz.ini
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# IDE
+.idea/
+*.swp
+*.swo
+gtk3-runtime-3.24.31-2022-01-04-ts-win64.exe
+
+# 测试文件夹
+
+# ==========================================
+# 核心构建资产 (Core Build Assets - Local Only)
+# 集中存放在 qqqworkflow/ 中，永不推送到云端
+# ==========================================
+qqqworkflow/
+
+miniaudio.py
+

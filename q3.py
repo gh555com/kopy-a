@@ -1,50 +1,23 @@
-# q3.py (v4.9.40 - "Zero-Delay Wait-Until-NonEmpty")
+# q3.py (v5.1.0 - Two Strategy, No FastClear)
 # -*- coding: utf-8 -*-
+
 """
-v4.9.40
-核心思路：**不延迟监听，只延迟“下结论”**
+v5.1.0
 
-1. 剪贴板一变：
-   - 立刻启动一次“捕获任务”（capture），并直接尝试读取一次剪贴板；
-   - 如果读到的是【非空数据】（文本/图片/文件等）——> 立刻弹窗；
-   - 如果读到的是【空数据/未准备好】——> 不弹窗，开启一个小定时器轮询剪贴板。
-
-2. 轮询逻辑（每 15ms 左右轮询一次）：
-   - 每次都重读 clipboard.mimeData() + process_clipboard_data()
-   - 只要某一轮拿到了【非空数据】，马上结束轮询并弹窗；
-   - 如果一直都是“空”（type == "clear" 或 mimeData 为无格式），
-     一直憋着，直到超过 MAX_WAIT_MS（比如 1500ms）：
-        - 如果整个期间都只有“空”状态，就认定这次真的是“清空剪贴板”，弹一个 clear 的 0b；
-        - 你要是觉得连 0b 也不想看，可以把 _finish_capture 里对 clear 的显示逻辑改成不弹即可。
-
-3. 对于你说的两个痛点：
-   - 【全屏截图 100% 失败】：现在改成“轮询直到有 image 数据或超时”，
-     不会再因为第一下读到空就直接报错弹 0b。
-   - 【文本复制狂点出现 0b】：这种是 OS/Qt 还没把文本塞完就触发 dataChanged，
-     新逻辑会把这些“过早的空读”全部当成“待确定状态”，憋在轮询里，不会立刻弹 0b。
-
-4. 冷却机制：
-   - 仍然保留 100ms 冷却，但：
-       - 如果当前已经有一个 capture 在进行中（还在轮询），
-         即使在冷却期内也允许新的剪贴板事件“刷新这次capture”，
-         保证不会错过新数据。
+变更要点：
+1. 移除 Fast Clear 逻辑（不再根据 formats() 为空就立刻弹清空），避免误伤全屏截图。
+2. 保留两种清空策略，但都基于“轮询次数 + 时间兜底”：
+   - CLEAR_STRATEGY_MODE = 0：快速模式（轮询次数少，硬超时短，更灵敏但更容易把“很慢才出数据”的情况认定为清空）。
+   - CLEAR_STRATEGY_MODE = 1：严格模式（轮询次数多，硬超时长，更偏向“等一等，也许是慢截图”）。
+3. 纯文本路径：只用 mime_data.text() + Python 计算字节数，减少底层 text/plain 调用。
+4. 未知类型（如 REAPERMedia）保持原有能力：抓 payload、算大小、显示“未知内容，类型: xxx”。
+5. 所有可调参数集中在顶部 CONFIG 区。
 """
 
 import sys
 import os
 import signal
 import concurrent.futures
-import random
-
-# --- (v4.9.33) 核心音频引擎 ---
-try:
-    from miniaudio_nonblocking_v15 import NonBlockingAudioEngine
-except ImportError:
-    print("=" * 60)
-    print("【!!】 错误：未找到 miniaudio_nonblocking_v15 库。")
-    print("【!!】 请先在环境中安装 miniaudio_nonblocking_v15 模块。")
-    print("=" * 60)
-    sys.exit(1)
 
 from PySide2.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout,
@@ -54,39 +27,66 @@ from PySide2.QtWidgets import (
 from PySide2.QtCore import (
     Qt, QTimer, QPoint, QPropertyAnimation, Signal, QBuffer,
     QIODevice, QParallelAnimationGroup, QAbstractAnimation,
-    QEasingCurve, QUrl, QEvent, QTime, QRect
+    QEvent, QTime, QRect
 )
 from PySide2.QtGui import (
-    QFont, QPainter, QColor, QPen, QFontDatabase, QCursor,
-    QTextOption, QTextCursor, QKeySequence, QPalette, QPixmap,
+    QFont, QPainter, QColor, QPen, QCursor,
+    QTextOption, QKeySequence, QPalette, QPixmap,
     QImage
 )
 
-Qaqqlication = QApplication
+# ==================== CONFIG：统一可调参数 ====================
 
-# ==================== 配置参数 ====================
+# 版本号
+VERSION = "5.1.0"
 
-COLOR_SCHEME_MODE = 4          # 颜色方案模式
-COOLDOWN_TIME_MS = 100         # 冷却时间（毫秒）
+# 颜色方案模式：
+#   1 = 黑色
+#   2 = 白色
+#   3 = 交替：黑 / 白
+#   4 = 交替：黑+白底部 / 白+黑底部
+COLOR_SCHEME_MODE = 4
 
+# 冷却时间（毫秒）
+COOLDOWN_TIME_MS = 100
+
+# 弹窗尺寸、布局相关
 POPUP_WIDTH = 222
 POPUP_HEIGHT = 222
 CONTENT_AREA_MAX_HEIGHT = 177
 BOTTOM_AREA_MIN_HEIGHT = 15
 
+# 弹窗动画 & 生命周期
 SLIDE_IN_DURATION = 88
 SLIDE_OUT_DURATION = 88
 LIFECYCLE_SECONDS = 119
 
+# 滚动条尺寸
 SCROLLBAR_WIDTH = 11
 SCROLLBAR_MARGIN_RIGHT = 2
 
+# 字体配置
 FONT_FAMILY = "Consolas"
 FONT_SIZE = 11
 FONT_FALLBACKS = [
     "Consolas", "monospace", "LXGW WenKai GB Screen",
     "SF Pro", "Segoe UI", "Aptos", "Roboto", "Arial"
 ]
+
+# 清空判断策略模式：
+#   0 = 快速模式（轮询次数少、超时短；响应快但对“超慢截图”更苛刻）
+#   1 = 严格模式（轮询次数多、超时长；更偏向等一等）
+CLEAR_STRATEGY_MODE = 1
+
+# 快速模式的捕获轮询参数
+CAPTURE_POLL_INTERVAL_MS_FAST = 15
+CAPTURE_MAX_ATTEMPTS_FAST = 60          # 正常 ~0.9s
+CAPTURE_HARD_TIMEOUT_MS_FAST = 3000     # 硬上限 ~3s
+
+# 严格模式的捕获轮询参数
+CAPTURE_POLL_INTERVAL_MS_STRICT = 15
+CAPTURE_MAX_ATTEMPTS_STRICT = 150       # 正常 ~2.25s
+CAPTURE_HARD_TIMEOUT_MS_STRICT = 7000   # 硬上限 ~7s
 
 # 颜色配置
 BLACK_BG = QColor(0, 0, 0, 240)
@@ -102,6 +102,19 @@ WHITE_TEXT_QCOLOR = QColor(3, 2, 1)
 WHITE_GOLD_HEX = "#8B4513"
 WHITE_SCROLL_HANDLE = "rgba(139, 69, 19, 204)"
 WHITE_HIGHLIGHT = QColor(139, 69, 19, 191)
+
+Qaqqlication = QApplication
+
+# ==================== 音频引擎 ====================
+
+try:
+    from miniaudio_nonblocking_v15 import NonBlockingAudioEngine
+except ImportError:
+    print("=" * 60)
+    print("【!!】 错误：未找到 miniaudio_nonblocking_v15 库。")
+    print("【!!】 请先在环境中安装 miniaudio_nonblocking_v15 模块。")
+    print("=" * 60)
+    sys.exit(1)
 
 # =============== 工具函数 ===============
 
@@ -230,7 +243,6 @@ class ClipboardMonitor(Qaqqlication):
 
         self.COLOR_SCHEME_MODE = COLOR_SCHEME_MODE
         self.current_color_mode = 0
-
         self.COOLDOWN_TIME_MS = COOLDOWN_TIME_MS
 
         # 音频引擎
@@ -254,20 +266,28 @@ class ClipboardMonitor(Qaqqlication):
         self.executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=os.cpu_count() or 8
         )
-
-        # v4.9.33 音效加载信息
         self.setup_sound_files()
 
-        # ====== 新增：捕获任务状态（核心） ======
+        # 捕获任务状态（Attempts-Based）
         self._capture_timer = QTimer(self)
         self._capture_timer.setSingleShot(False)
-        self._capture_timer.setInterval(15)   # 每 15ms 轮询一次
+
+        if CLEAR_STRATEGY_MODE == 0:
+            poll_interval = CAPTURE_POLL_INTERVAL_MS_FAST
+            self._capture_max_attempts = CAPTURE_MAX_ATTEMPTS_FAST
+            self._capture_hard_timeout_ms = CAPTURE_HARD_TIMEOUT_MS_FAST
+        else:
+            poll_interval = CAPTURE_POLL_INTERVAL_MS_STRICT
+            self._capture_max_attempts = CAPTURE_MAX_ATTEMPTS_STRICT
+            self._capture_hard_timeout_ms = CAPTURE_HARD_TIMEOUT_MS_STRICT
+
+        self._capture_timer.setInterval(poll_interval)
         self._capture_timer.timeout.connect(self._poll_clipboard)
 
-        self._capture_active = False         # 当前是否存在一个捕获任务
-        self._capture_start_time = None      # QTime，用来计算已等待多久
-        self._capture_seen_clear = False     # 在本次捕获周期内，是否见过“clear”结果
-        self._capture_max_wait_ms = 1500     # 最大等待时间阈值（毫秒）
+        self._capture_active = False
+        self._capture_start_time = None
+        self._capture_seen_clear = False
+        self._capture_attempts = 0
 
     # --- 音效相关 ---
 
@@ -322,7 +342,12 @@ class ClipboardMonitor(Qaqqlication):
     # === 数据解析 ===
 
     def process_clipboard_data(self, mime_data):
-        # 注意：这里的 "clear" 在新逻辑下，只代表“当前读取为空”，不立即弹窗
+        """
+        统一把 mime_data 转成内部结构：
+            - type: clear / text / image / file / other
+        纯文本只用 text() + Python 计算字节数。
+        未知类型仍然抓 payload、算大小、显示类型。
+        """
         if not mime_data or not mime_data.formats():
             return {
                 "type": "clear",
@@ -333,7 +358,7 @@ class ClipboardMonitor(Qaqqlication):
 
         all_formats = mime_data.formats()
 
-        # 1. 优先处理图片（截图）
+        # 1. 图片
         if mime_data.hasImage():
             pixmap = self.clipboard().pixmap()
             if not pixmap.isNull():
@@ -382,7 +407,7 @@ class ClipboardMonitor(Qaqqlication):
                 except Exception:
                     pass
 
-            # hasImage=True 但读取失败，仍视为“空”，交给外层逻辑继续轮询
+            # hasImage=True 但暂时读不到 → 当成 clear，让轮询继续
             return {
                 "type": "clear",
                 "top_text": "",
@@ -438,11 +463,10 @@ class ClipboardMonitor(Qaqqlication):
                 "paths": local_paths,
             }
 
-        # 3. 文本
+        # 3. 纯文本
         if mime_data.hasText():
             text = mime_data.text()
             if not text:
-                # 真正的“空文本”，交给外层轮询决定是“暂时空”还是“真的清空”
                 return {
                     "type": "clear",
                     "top_text": "",
@@ -450,9 +474,9 @@ class ClipboardMonitor(Qaqqlication):
                     "bottom_text": self.format_size(0),
                 }
             try:
-                data_size = mime_data.data("text/plain").size()
-            except Exception:
                 data_size = len(text.encode("utf-8", "replace"))
+            except Exception:
+                data_size = 0
             bottom_text = self.format_size(data_size)
             return {
                 "type": "text",
@@ -460,7 +484,7 @@ class ClipboardMonitor(Qaqqlication):
                 "bottom_text": bottom_text,
             }
 
-        # 4. 其他类型（尽量看看有没有可解码的文本）
+        # 4. 其他未知类型
         if all_formats:
             filtered_formats = [
                 f
@@ -536,6 +560,8 @@ class ClipboardMonitor(Qaqqlication):
         if popup in self.active_popups:
             popup.update_bottom_text(final_text)
 
+    # --- 工具函数 ---
+
     def format_size(self, size_bytes):
         if size_bytes < 0:
             return "未知大小"
@@ -552,43 +578,52 @@ class ClipboardMonitor(Qaqqlication):
             self.COOLDOWN_TIME_MS, lambda: setattr(self, "is_on_cooldown", False)
         )
 
-    # ========= 这里是新核心：捕获任务 + 轮询 =========
+    # ========= Attempts-Based Capture（两种模式共用） =========
 
     def on_clipboard_changed(self):
         """
         剪贴板一有变动就进这里：
-        - 不再直接弹窗；
-        - 而是启动/刷新一次“捕获任务”，进入轮询模式。
+        - 不做 Fast Clear，全部走“轮询确认”；
+        - 模式 0/1 的区别只在 _capture_max_attempts 和 _capture_hard_timeout_ms。
         """
-        # 如果当前没有在捕获，并且处于冷却中，就直接略过
         if self.is_on_cooldown and not self._capture_active:
+            # 冷却期内不新开 capture，避免刷屏
             return
 
-        # 启动/刷新捕获任务
-        self._capture_active = True
-        self._capture_start_time = QTime.currentTime()
-        self._capture_seen_clear = False  # 本次捕获过程中是否看见过“clear”
+        now = QTime.currentTime()
 
-        # 确保轮询定时器在跑
+        if not self._capture_active:
+            # 启动新的 capture
+            self._capture_active = True
+            self._capture_attempts = 0
+            self._capture_seen_clear = False
+            self._capture_start_time = now
+        else:
+            # 当前已有 capture，在此基础上刷新计数和时间
+            self._capture_attempts = 0
+            self._capture_seen_clear = False
+            self._capture_start_time = now
+
         if not self._capture_timer.isActive():
             self._capture_timer.start()
 
-        # 立刻先跑一轮（无延迟），不会弹 0b，只是尝试拿数据
+        # 立刻跑一轮
         self._poll_clipboard()
 
     def _poll_clipboard(self):
         """
         轮询读取剪贴板：
-        - 非空数据：立即结束捕获并弹窗；
-        - 空数据：记录一下，本轮不弹，继续等；
-        - 超过 _capture_max_wait_ms：根据是否见过“clear”决定是否弹一个真正的 clear。
+        - 非空数据：立即结束 capture 并弹窗；
+        - 空数据：记录 clear，继续轮询；
+        - attempts 达到上限 或 elapsed 超过 hard timeout：结束 capture。
         """
         if not self._capture_active:
             return
 
+        self._capture_attempts += 1
+
         clipboard = self.clipboard()
         if not clipboard:
-            # 极端情况，当作“暂时空”
             data = None
         else:
             try:
@@ -608,20 +643,19 @@ class ClipboardMonitor(Qaqqlication):
 
         # 判定非空 / 空
         if data and data.get("type") != "clear":
-            # 非空数据 -> 立刻结束捕获并弹窗
             self._finish_capture(data)
             return
         else:
-            # 空数据（包括 process_clipboard_data 返回 clear 或 data 为 None）
             if data and data.get("type") == "clear":
                 self._capture_seen_clear = True
 
-        # 时间检查：是否超时
+        # 检查 attempts + hard timeout
         now = QTime.currentTime()
         elapsed = self._capture_start_time.msecsTo(now) if self._capture_start_time else 0
 
-        if elapsed >= self._capture_max_wait_ms:
-            # 超时了：如果期间见过“clear”，说明很大概率是真清空
+        if (self._capture_attempts >= self._capture_max_attempts) or (
+            elapsed >= self._capture_hard_timeout_ms
+        ):
             if self._capture_seen_clear:
                 clear_data = {
                     "type": "clear",
@@ -631,35 +665,28 @@ class ClipboardMonitor(Qaqqlication):
                 }
                 self._finish_capture(clear_data)
             else:
-                # 从头到尾连 clear 都没拿到，就当这次事件作废，不弹窗
                 self._finish_capture(None)
             return
 
-        # 未超时且仍然是空 -> 继续等下一轮定时器
-        # 什么都不做，等下一次 _capture_timer timeout 再进来
-
     def _finish_capture(self, data):
         """
-        结束本次捕获任务：
-        - 停掉轮询；
-        - 如果 data 为 None：不弹任何东西；
-        - 如果 data 有内容：走统一弹窗逻辑。
+        结束本次 capture：
+        - 停止轮询；
+        - data 为 None：不弹窗；
+        - data 有内容：统一走 _show_popup。
         """
         self._capture_active = False
         if self._capture_timer.isActive():
             self._capture_timer.stop()
 
         if not data:
-            # 不弹窗，也不进入冷却，这样不会因为一次“空捕获”而吞掉下一次事件
             return
 
-        # 有数据 -> 统一用 show_popup 处理
         self._show_popup(data)
 
     def _show_popup(self, data):
         """
-        原来 on_clipboard_changed 里那坨“播放音效+弹窗”的逻辑，
-        抽成一个独立方法，给 _finish_capture 调用。
+        统一弹窗逻辑。
         """
         try:
             if data.get("type") == "clear":
@@ -667,13 +694,13 @@ class ClipboardMonitor(Qaqqlication):
             else:
                 self.play_random_sound()
 
-            # 如果有粘住的弹窗，就不再创建新弹窗
+            # 如果有粘住的弹窗，就不再新增
             sticky_popups = [p for p in self.active_popups if p.is_sticky]
             if sticky_popups:
                 self.set_cooldown()
                 return
 
-            # 让上一个非 sticky、未 slide_out 的弹窗先滑走
+            # 让最近一个非 sticky 且未 slide_out 的弹窗先滑走
             stationary_popup = next(
                 (
                     p
@@ -693,17 +720,14 @@ class ClipboardMonitor(Qaqqlication):
             else:
                 self.current_color_mode = 0
 
-            # 创建新弹窗
             new_popup = TransparentPopup(
                 data, self, self.current_color_mode, self.COLOR_SCHEME_MODE
             )
             new_popup.raise_()
             self.active_popups.append(new_popup)
 
-            # 设置冷却，防止瞬间爆一堆弹窗
             self.set_cooldown()
 
-            # 文件类型，异步算总大小
             if data.get("type") == "file" and "paths" in data:
                 new_popup.update_bottom_text(data["bottom_template"].format("●"))
                 self.calculate_total_size_async(
@@ -959,12 +983,12 @@ class TransparentPopup(QWidget):
         self.top_content.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.top_content.internal_copy_triggered.connect(self.monitor.play_random_sound)
         self.top_content.setCursorWidth(0)
-        self.top_content.setMaximumHeight(self.CONTENT_AREA_MAX_HEIGHT)
+        self.top_content.setMaximumHeight(CONTENT_AREA_MAX_HEIGHT)
 
         self.bottom_message_label = QLabel(self.original_data.get("bottom_text", ""))
         self.bottom_message_label.setFont(font)
         self.bottom_message_label.setAlignment(Qt.AlignBottom | Qt.AlignLeft)
-        self.bottom_message_label.setMinimumHeight(self.BOTTOM_AREA_MIN_HEIGHT)
+        self.bottom_message_label.setMinimumHeight(BOTTOM_AREA_MIN_HEIGHT)
 
         layout.addWidget(self.top_content)
         layout.addWidget(self.bottom_message_label)
@@ -992,12 +1016,12 @@ class TransparentPopup(QWidget):
 
     def update_scrollbar_geometry(self):
         try:
-            x = self.width() - self.SCROLLBAR_WIDTH - self.SCROLLBAR_MARGIN_RIGHT
+            x = self.width() - SCROLLBAR_WIDTH - SCROLLBAR_MARGIN_RIGHT
             y_start = int(self.border_thickness / 2.0)
             y_end = self.bottom_message_label.y()
             height = y_end - y_start
             self.overlay_scrollbar.setGeometry(
-                int(x), int(y_start), int(self.SCROLLBAR_WIDTH), int(height)
+                int(x), int(y_start), int(SCROLLBAR_WIDTH), int(height)
             )
         except Exception:
             pass
@@ -1152,10 +1176,10 @@ class TransparentPopup(QWidget):
         self.is_sliding_out = True
         self.anim_group = QParallelAnimationGroup(self)
         opacity_anim = QPropertyAnimation(self, b"windowOpacity")
-        opacity_anim.setDuration(self.SLIDE_OUT_DURATION)
+        opacity_anim.setDuration(SLIDE_OUT_DURATION)
         opacity_anim.setEndValue(0.0)
         pos_anim = QPropertyAnimation(self, b"pos")
-        pos_anim.setDuration(self.SLIDE_OUT_DURATION)
+        pos_anim.setDuration(SLIDE_OUT_DURATION)
         pos_anim.setEndValue(QPoint(self.x() - 80, self.y()))
         self.anim_group.addAnimation(opacity_anim)
         self.anim_group.addAnimation(pos_anim)
@@ -1174,7 +1198,7 @@ class TransparentPopup(QWidget):
             self.y(),
         )
         self.slide_anim = QPropertyAnimation(self, b"pos")
-        self.slide_anim.setDuration(self.SLIDE_IN_DURATION)
+        self.slide_anim.setDuration(SLIDE_IN_DURATION)
         self.slide_anim.setEndValue(end_pos)
         self.slide_anim.start()
 
@@ -1224,6 +1248,9 @@ if __name__ == "__main__":
 
     Qaqqlication.setAttribute(Qt.AA_EnableHighDpiScaling)
     Qaqqlication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
+    mode_text = "快速模式(0)" if CLEAR_STRATEGY_MODE == 0 else "严格模式(1)"
+    print(f"剪贴板监控工具版本: {VERSION}，清空策略: {mode_text}")
 
     try:
         app = ClipboardMonitor(sys.argv)
