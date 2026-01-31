@@ -10,7 +10,6 @@ import os
 import random
 import threading
 from concurrent.futures import ThreadPoolExecutor
-import numpy as np
 
 class NonBlockingAudioEngine:
     """
@@ -26,10 +25,6 @@ class NonBlockingAudioEngine:
         self.REQUESTED_FORMAT = miniaudio.SampleFormat.SIGNED16
         self.REQUESTED_CHANNELS = 2
         self.REQUESTED_RATE = 44100
-
-        # 淡出设置
-        self.FADE_OUT_DURATION = 1.0  # 淡出持续时间(秒)
-        self.FADE_OUT_ENABLED = False  # 是否启用淡出
 
         # 线程池设置 (从q1.py的多线程实现)
         self.executor = ThreadPoolExecutor(max_workers=32)  # 支持最多32个并发音效
@@ -114,43 +109,7 @@ class NonBlockingAudioEngine:
         return sound_list[new_index]
 
     # --- (取自 V2：更健壮的播放) ---
-    def _apply_fade_out(self, sound_generator, fade_duration):
-        """
-        应用淡出效果到音频流 (性能优化版本)
-        """
-        samples_processed = 0
-        fade_samples = int(fade_duration * self.REQUESTED_RATE)
-
-        # 预计算淡出因子数组 (一次性计算，避免重复计算)
-        if fade_samples > 0:
-            fade_factors = np.linspace(1.0, 0.0, fade_samples, dtype=np.float32)
-        else:
-            fade_factors = np.array([], dtype=np.float32)
-
-        for frame in sound_generator:
-            if samples_processed < fade_samples:
-                # 使用预计算的淡出因子
-                samples = np.frombuffer(frame, dtype=np.int16)
-                frame_samples = len(samples) // self.REQUESTED_CHANNELS
-
-                # 获取对应的淡出因子
-                end_idx = min(samples_processed + frame_samples, fade_samples)
-                current_factors = fade_factors[samples_processed:end_idx]
-
-                if len(current_factors) > 0:
-                    # 向量化处理 (比逐个样本处理快3-5倍)
-                    samples_view = samples.reshape(-1, self.REQUESTED_CHANNELS)
-                    factor_broadcast = current_factors[:len(samples_view), np.newaxis]
-                    samples_view[:len(factor_broadcast)] = (samples_view[:len(factor_broadcast)] * factor_broadcast).astype(np.int16)
-
-                    yield samples.tobytes()
-                    samples_processed += len(current_factors)
-                else:
-                    yield frame
-            else:
-                yield frame
-
-    def _play_sound_worker(self, file_path, enable_fade_out=None):
+    def _play_sound_worker(self, file_path):
         """
         基于q2.py的v15逻辑的音频播放工作线程函数
         这是实际执行音频播放的函数，会在单独的线程中运行
@@ -158,9 +117,6 @@ class NonBlockingAudioEngine:
         sound = None
         device = None
         file_duration = 0.0
-
-        # 确定是否启用淡出
-        use_fade_out = enable_fade_out if enable_fade_out is not None else self.FADE_OUT_ENABLED
 
         try:
             # 检查文件是否存在
@@ -180,19 +136,12 @@ class NonBlockingAudioEngine:
 
             # 步骤 2/5: 尝试将文件作为 "流" 打开
             try:
-                raw_sound = miniaudio.stream_file(
+                sound = miniaudio.stream_file(
                     file_path,
                     output_format=self.REQUESTED_FORMAT,
                     nchannels=self.REQUESTED_CHANNELS,
                     sample_rate=self.REQUESTED_RATE
                 )
-
-                # 如果启用淡出，包装音频流
-                if use_fade_out and file_duration > self.FADE_OUT_DURATION:
-                    sound = self._apply_fade_out(raw_sound, self.FADE_OUT_DURATION)
-                else:
-                    sound = raw_sound
-
             except Exception as e:
                 print(f"【!!】 打开音频流失败 {file_path}: {e}")
                 return
@@ -206,7 +155,7 @@ class NonBlockingAudioEngine:
                 )
             except Exception as e:
                 print(f"【!!】 初始化播放设备失败: {e}")
-                if sound and hasattr(sound, 'close'):
+                if sound:
                     sound.close()
                 return
 
@@ -215,10 +164,9 @@ class NonBlockingAudioEngine:
                 device.start(sound)
             except Exception as e:
                 print(f"【!!】 启动播放失败 {file_path}: {e}")
-                if sound and hasattr(sound, 'close'):
+                if sound:
                     sound.close()
-                if device:
-                    device.close()
+                device.close()
                 return
 
             # 步骤 5/5: 等待播放完成 (v15核心逻辑)
@@ -241,77 +189,51 @@ class NonBlockingAudioEngine:
                     pass  # 忽略 stop 时的错误
                 device.close()
 
-            if sound and hasattr(sound, 'close'):
-                try:
-                    sound.close()
-                except:
-                    pass
+            if sound:
+                sound.close()
     # --- (V2 逻辑结束) ---
 
-    def play_random_sound(self, fade_out=None):
-        """播放随机主音效
-        Args:
-            fade_out (bool, optional): 是否启用淡出，None则使用全局设置
-        """
+    def play_random_sound(self):
+        """播放随机主音效"""
         sound = self._get_random_sound(self.main_sounds, self.last_played_main)
         if sound:
             self.last_played_main = self.main_sounds.index(sound)
-            self.executor.submit(self._play_sound_worker, sound, fade_out)
+            self.executor.submit(self._play_sound_worker, sound)
 
-    def play_q_sound(self, fade_out=None):
-        """播放随机q系列音效
-        Args:
-            fade_out (bool, optional): 是否启用淡出，None则使用全局设置
-        """
+    def play_q_sound(self):
+        """播放随机q系列音效"""
         sound = self._get_random_sound(self.q_sounds, self.last_played_q)
         if sound:
             self.last_played_q = self.q_sounds.index(sound)
-            self.executor.submit(self._play_sound_worker, sound, fade_out)
+            self.executor.submit(self._play_sound_worker, sound)
 
-    def play_z_sound(self, fade_out=None):
-        """播放随机z系列音效
-        Args:
-            fade_out (bool, optional): 是否启用淡出，None则使用全局设置
-        """
+    def play_z_sound(self):
+        """播放随机z系列音效"""
         sound = self._get_random_sound(self.z_sounds, self.last_played_z)
         if sound:
             self.last_played_z = self.z_sounds.index(sound)
-            self.executor.submit(self._play_sound_worker, sound, fade_out)
+            self.executor.submit(self._play_sound_worker, sound)
 
-    def play_sound_file(self, file_path, fade_out=None):
-        """播放指定的音频文件
-        Args:
-            fade_out (bool, optional): 是否启用淡出，None则使用全局设置
-        """
+    def play_sound_file(self, file_path):
+        """播放指定的音频文件"""
         if os.path.exists(file_path):
-            self.executor.submit(self._play_sound_worker, file_path, fade_out)
+            self.executor.submit(self._play_sound_worker, file_path)
 
-    def play_sound_index(self, sound_type, index, fade_out=None):
+    def play_sound_index(self, sound_type, index):
         """
         播放指定类型的特定索引音效
         sound_type: 'main', 'q', 'z'
         index: 音效索引（从1开始）
-        fade_out (bool, optional): 是否启用淡出，None则使用全局设置
         """
         if sound_type == 'main':
             if 1 <= index <= len(self.main_sounds):
-                self.executor.submit(self._play_sound_worker, self.main_sounds[index-1], fade_out)
+                self.executor.submit(self._play_sound_worker, self.main_sounds[index-1])
         elif sound_type == 'q':
             if 1 <= index <= len(self.q_sounds):
-                self.executor.submit(self._play_sound_worker, self.q_sounds[index-1], fade_out)
+                self.executor.submit(self._play_sound_worker, self.q_sounds[index-1])
         elif sound_type == 'z':
             if 1 <= index <= len(self.z_sounds):
-                self.executor.submit(self._play_sound_worker, self.z_sounds[index-1], fade_out)
-
-    def set_fade_out(self, enabled=True, duration=1.0):
-        """设置全局淡出参数
-        Args:
-            enabled (bool): 是否启用淡出
-            duration (float): 淡出持续时间(秒)
-        """
-        self.FADE_OUT_ENABLED = enabled
-        self.FADE_OUT_DURATION = duration
-        print(f"淡出设置: {'启用' if enabled else '禁用'}, 持续时间: {duration}秒")
+                self.executor.submit(self._play_sound_worker, self.z_sounds[index-1])
 
     # --- (取自 V1：正确的清理) ---
     def cleanup(self):
