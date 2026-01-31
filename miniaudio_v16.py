@@ -1,17 +1,12 @@
 # 文件名: q1.py
 #
-# v1.6.0
-# - loop 无缝：在 _pcm_loop_stream 加入“短 crossfade”支持（默认 12ms），并用预处理避免运行时高CPU
-# - 新增验证接口：NonBlockingAudioEngine.validate_environment() -> "ok" / "not ok: ..."
-#   * 不依赖任何外部音频文件，仅使用内存生成PCM，验证 miniaudio/PlaybackDevice/回调协议/cleanup
-# - 继承 v1.5.2：
-#   * 修复 prime StopIteration：skip 移到 worker 且空读重试
-#   * trim_silence 默认 True，首尾去静音剪裁（更坚决更干净）+ 缓存
-#   * 非循环支持余弦淡出
-#   * stream_file send(framecount) 限制 <= 16384
-#   * PCM 循环段小 LRU 缓存
+# v1.6.1
+# - 修复：当 miniaudio API 不符合预期时，不让引擎初始化直接 AttributeError 炸掉
+# - validate_environment(): 不依赖外部文件，返回 "ok" 或 "not ok: ...\n<details...>"
+# - not ok 时包含：miniaudio.__file__/__version__/缺失符号/疑似同名遮蔽提示/traceback 等详细原因
+# - loop 无缝：PCM 预处理一次做短 crossfade（默认12ms），回绕跳过头部 N 帧
+# - 继承 v1.5.2 的全部稳定性策略：send<=16384、空读重试、trim缓存、PCM缓存、token.stop、cleanup 防残留
 
-import miniaudio
 import time
 import os
 import random
@@ -23,6 +18,15 @@ import atexit
 import threading
 from functools import lru_cache
 from collections import OrderedDict
+import traceback
+
+# ------------------ 可选：miniaudio 导入（可能失败/被遮蔽） ------------------
+_MINIAUDIO_IMPORT_ERROR = None
+try:
+    import miniaudio  # noqa
+except Exception as e:
+    miniaudio = None  # type: ignore
+    _MINIAUDIO_IMPORT_ERROR = e
 
 
 # ===================== 可调参数（你想更“狠”就调这里） =====================
@@ -76,6 +80,126 @@ def _raised_cosine_crossfade_gains(n: int):
     return tuple(out_g), tuple(in_g)
 
 
+def _short_exc(e: Exception) -> str:
+    return f"{type(e).__name__}: {e}"
+
+
+def _miniaudio_file_hint() -> str:
+    """
+    给出“是否被同名文件/目录遮蔽”的提示（高概率是你现在的情况）。
+    """
+    if miniaudio is None:
+        return ""
+    p = getattr(miniaudio, "__file__", "") or ""
+    if not p:
+        return "miniaudio.__file__ 为空（异常情况，可能是被奇怪的模块遮蔽）"
+    cwd = os.path.abspath(os.getcwd())
+    ap = os.path.abspath(p)
+    # 如果 miniaudio 来自当前工作目录（或其子目录），基本就是被项目文件遮蔽了
+    if ap.startswith(cwd + os.sep) or ap == cwd:
+        return (
+            "⚠️ 疑似同名遮蔽：当前导入的 miniaudio 来自工作目录/项目目录。\n"
+            f"  当前工作目录: {cwd}\n"
+            f"  miniaudio.__file__: {ap}\n"
+            "  请检查是否存在 miniaudio.py 或 miniaudio/ 目录，导致覆盖了 site-packages 的 miniaudio。"
+        )
+    return ""
+
+
+def _miniaudio_diagnostics(verbose_trace=False) -> str:
+    """
+    输出一份尽量完整的环境诊断（用于 validate not ok 时打印）
+    """
+    lines = []
+    lines.append(f"python: {sys.version.splitlines()[0]}")
+    lines.append(f"platform: {sys.platform}")
+    lines.append(f"cwd: {os.path.abspath(os.getcwd())}")
+
+    if miniaudio is None:
+        lines.append("miniaudio: IMPORT FAILED")
+        if _MINIAUDIO_IMPORT_ERROR is not None:
+            lines.append(f"import error: {_short_exc(_MINIAUDIO_IMPORT_ERROR)}")
+            if verbose_trace:
+                lines.append(traceback.format_exc())
+        return "\n".join(lines)
+
+    mf = getattr(miniaudio, "__file__", None)
+    mv = getattr(miniaudio, "__version__", None)
+    lines.append(f"miniaudio.__file__: {mf}")
+    lines.append(f"miniaudio.__version__: {mv}")
+
+    hint = _miniaudio_file_hint()
+    if hint:
+        lines.append(hint)
+
+    # 关键符号检查
+    required = ["PlaybackDevice", "SampleFormat", "stream_file", "get_file_info"]
+    missing = [x for x in required if not hasattr(miniaudio, x)]
+    lines.append(f"missing symbols: {missing if missing else 'none'}")
+
+    # 如果缺失，顺带把前 40 个属性列出来帮助定位“这到底是什么包”
+    if missing:
+        attrs = sorted([a for a in dir(miniaudio) if not a.startswith("_")])
+        lines.append("exported attributes (partial): " + ", ".join(attrs[:40]) + (" ..." if len(attrs) > 40 else ""))
+
+    return "\n".join(lines)
+
+
+class _MiniaudioCompat:
+    """
+    把 miniaudio 的关键 API 取出来。
+    若不满足，给出详细原因。
+    """
+    def __init__(self):
+        self.ok = True
+        self.reason_lines = []
+
+        if miniaudio is None:
+            self.ok = False
+            self.reason_lines.append("miniaudio import failed")
+            if _MINIAUDIO_IMPORT_ERROR is not None:
+                self.reason_lines.append(_short_exc(_MINIAUDIO_IMPORT_ERROR))
+            return
+
+        # PlaybackDevice
+        self.PlaybackDevice = getattr(miniaudio, "PlaybackDevice", None)
+        if self.PlaybackDevice is None:
+            self.ok = False
+            self.reason_lines.append("miniaudio.PlaybackDevice not found")
+
+        # SampleFormat + SIGNED16
+        self.SampleFormat = getattr(miniaudio, "SampleFormat", None)
+        self.SIGNED16 = None
+        if self.SampleFormat is None:
+            self.ok = False
+            self.reason_lines.append("miniaudio.SampleFormat not found")
+        else:
+            self.SIGNED16 = getattr(self.SampleFormat, "SIGNED16", None)
+            if self.SIGNED16 is None:
+                self.ok = False
+                self.reason_lines.append("miniaudio.SampleFormat.SIGNED16 not found")
+
+        # functions
+        self.stream_file = getattr(miniaudio, "stream_file", None)
+        if self.stream_file is None:
+            self.ok = False
+            self.reason_lines.append("miniaudio.stream_file not found")
+
+        self.get_file_info = getattr(miniaudio, "get_file_info", None)
+        if self.get_file_info is None:
+            self.ok = False
+            self.reason_lines.append("miniaudio.get_file_info not found")
+
+    def reason(self, with_diag=True) -> str:
+        base = "\n".join(self.reason_lines) if self.reason_lines else ""
+        if not with_diag:
+            return base or "unknown"
+        diag = _miniaudio_diagnostics(verbose_trace=False)
+        if base:
+            return base + "\n\n--- diagnostics ---\n" + diag
+        return "not ok\n\n--- diagnostics ---\n" + diag
+
+
 class PlaybackToken:
     __slots__ = ("stop_event",)
 
@@ -96,7 +220,14 @@ class NonBlockingAudioEngine:
         self._log("非阻塞音频引擎 (NonBlockingAudioEngine) 正在初始化...")
         self.asset_folder = asset_folder
 
-        self.REQUESTED_FORMAT = miniaudio.SampleFormat.SIGNED16
+        # 关键：这里先做 compat 检测，不满足就给出详细原因，避免 AttributeError
+        self._compat = _MiniaudioCompat()
+        if not self._compat.ok:
+            raise RuntimeError(self._compat.reason(with_diag=True))
+
+        # 取出需要的 API
+        self.PlaybackDevice = self._compat.PlaybackDevice
+        self.REQUESTED_FORMAT = self._compat.SIGNED16  # SampleFormat.SIGNED16
         self.REQUESTED_CHANNELS = 2
         self.REQUESTED_RATE = 44100
         self._frame_bytes = self.REQUESTED_CHANNELS * 2
@@ -297,12 +428,10 @@ class NonBlockingAudioEngine:
         )
 
         try:
-            # skip 到 segment 起点
             if start_frame > 0:
                 if not self._skip_frames(src, start_frame, token):
                     return start_frame, end_frame
 
-            # 头部扫描
             first_loud = None
             carry = 0
             analyzed = 0
@@ -331,23 +460,19 @@ class NonBlockingAudioEngine:
                 analyzed += got
 
             if first_loud is None:
-                first_loud = lead_frames  # 头窗全静音
+                first_loud = lead_frames
 
-            # 跳到尾窗起点（从 segment 起点算）
             seg_pos = analyzed
             if seg_pos < tail_start_offset:
                 if not self._skip_frames(src, tail_start_offset - seg_pos, token):
-                    # 跳不过去就按“尾部全静音”处理
                     last_loud_end = tail_start_offset - 1
                     new_start = start_frame + min(first_loud, total_frames)
                     new_end = start_frame + max(new_start - start_frame, min(last_loud_end + 1, total_frames))
                     if new_end < new_start:
                         new_end = new_start
                     return new_start, new_end
-
                 seg_pos = tail_start_offset
 
-            # 尾部扫描（需要最后一次连续 run 的结束帧）
             carry_tail = 0
             last_loud_end = -1
             while seg_pos < total_frames:
@@ -372,9 +497,8 @@ class NonBlockingAudioEngine:
                 seg_pos += got
 
             if last_loud_end < 0:
-                # 尾窗也没满足连续 run：更狠的策略 => 直接剪掉整个尾窗
                 if first_loud >= total_frames:
-                    return start_frame, start_frame  # 全静音
+                    return start_frame, start_frame
                 last_loud_end = tail_start_offset - 1
 
             new_start = start_frame + max(0, min(first_loud, total_frames))
@@ -390,7 +514,6 @@ class NonBlockingAudioEngine:
                 pass
 
     def _trim_silence_edges(self, file_path: str, start_frame: int, end_frame: int, token: PlaybackToken):
-        """带缓存的 trim。"""
         try:
             st = os.stat(file_path)
             mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
@@ -407,7 +530,6 @@ class NonBlockingAudioEngine:
                 return ent[2], ent[3]
 
         new_start, new_end = self._trim_silence_edges_uncached(file_path, start_frame, end_frame, token)
-
         with self._trim_cache_lock:
             self._trim_cache[key] = (mtime_ns, size, new_start, new_end)
         return new_start, new_end
@@ -472,7 +594,7 @@ class NonBlockingAudioEngine:
             remain = seg_frames - played
             want = want_total if want_total <= remain else remain
 
-            data = self._send_primed(source_gen, want)  # want 通常很小（回调请求）
+            data = self._send_primed(source_gen, want)
             if not data:
                 return
 
@@ -516,14 +638,13 @@ class NonBlockingAudioEngine:
             return pcm_bytes, 0
 
         total_frames = len(pcm_bytes) // self._frame_bytes
-        if total_frames < 8:
+        if total_frames < 16:
             return pcm_bytes, 0
 
         xfade_frames = int((xms / 1000.0) * self.REQUESTED_RATE)
         if xfade_frames <= 0:
             return pcm_bytes, 0
 
-        # 防止太长：至少留出足够主体（不然整个段都在交叉）
         if xfade_frames * 2 >= total_frames:
             xfade_frames = max(1, total_frames // 4)
 
@@ -608,7 +729,6 @@ class NonBlockingAudioEngine:
                 pos += take
 
                 if pos >= total_frames:
-                    # 关键：回绕时跳过头部 xfade_frames（因为尾部已混入头部前 xfade_frames）
                     pos = xfade_frames if xfade_frames > 0 else 0
 
             framecount = yield bytes(out)
@@ -623,7 +743,6 @@ class NonBlockingAudioEngine:
         except Exception:
             mtime_ns, size = None, None
 
-        # crossfade_ms 会影响缓存内容
         try:
             xms = float(crossfade_ms or 0.0)
         except Exception:
@@ -673,7 +792,6 @@ class NonBlockingAudioEngine:
             except Exception:
                 pass
 
-        # 做 loop crossfade 预处理（一次）
         pcm2, xfade_frames = self._prepare_pcm_loop_crossfade(pcm, xms)
 
         with self._pcm_cache_lock:
@@ -735,7 +853,6 @@ class NonBlockingAudioEngine:
             start_frame = int(start_s * rate)
             end_frame = int(end_s * rate)
 
-            # trim（默认开）+ 缓存
             if trim_silence and not token.stopped:
                 start_frame, end_frame = self._trim_silence_edges(file_path, start_frame, end_frame, token)
 
@@ -748,7 +865,7 @@ class NonBlockingAudioEngine:
 
             seg_duration = seg_frames / float(rate)
 
-            # loop：无缝 => 预解码 + crossfade 预处理 + 跳过头部 xfade_frames
+            # loop：无缝 => 预解码 + crossfade 预处理 + 回绕跳过头部 xfade_frames
             if loop:
                 if seg_duration <= LOOP_PREDECODE_MAX_SECONDS:
                     pcm, xfade_frames = self._get_pcm_cached_or_decode(
@@ -763,7 +880,7 @@ class NonBlockingAudioEngine:
                     except StopIteration:
                         return
 
-                    device = miniaudio.PlaybackDevice(
+                    device = self.PlaybackDevice(
                         output_format=self.REQUESTED_FORMAT,
                         nchannels=self.REQUESTED_CHANNELS,
                         sample_rate=self.REQUESTED_RATE
@@ -773,54 +890,53 @@ class NonBlockingAudioEngine:
                     while not token.stopped:
                         time.sleep(0.1)
                     return
-                else:
-                    self._log(f"提示：片段 {seg_duration:.1f}s 过长，避免预解码循环（可调 LOOP_PREDECODE_MAX_SECONDS）。")
-                    # 过长：退化方案（不保证100%无缝），也不做 crossfade
-                    while not token.stopped:
-                        decoder = miniaudio.stream_file(
-                            file_path,
-                            output_format=self.REQUESTED_FORMAT,
-                            nchannels=self.REQUESTED_CHANNELS,
-                            sample_rate=self.REQUESTED_RATE
-                        )
 
-                        if start_frame > 0:
-                            if not self._skip_frames(decoder, start_frame, token):
-                                return
-
-                        stream = self._segment_stream_from_here(decoder, seg_frames, fade_frames=0, token=token)
-                        try:
-                            stream.send(None)
-                        except StopIteration:
+                # 过长：退化方案（不保证100%无缝），也不做 crossfade
+                self._log(f"提示：片段 {seg_duration:.1f}s 过长，避免预解码循环（可调 LOOP_PREDECODE_MAX_SECONDS）。")
+                while not token.stopped:
+                    decoder = miniaudio.stream_file(
+                        file_path,
+                        output_format=self.REQUESTED_FORMAT,
+                        nchannels=self.REQUESTED_CHANNELS,
+                        sample_rate=self.REQUESTED_RATE
+                    )
+                    if start_frame > 0:
+                        if not self._skip_frames(decoder, start_frame, token):
                             return
 
-                        device = miniaudio.PlaybackDevice(
-                            output_format=self.REQUESTED_FORMAT,
-                            nchannels=self.REQUESTED_CHANNELS,
-                            sample_rate=self.REQUESTED_RATE
-                        )
-                        device.start(stream)
+                    stream = self._segment_stream_from_here(decoder, seg_frames, fade_frames=0, token=token)
+                    try:
+                        stream.send(None)
+                    except StopIteration:
+                        return
 
-                        t_end = time.time() + seg_duration + 0.25
-                        while (time.time() < t_end) and (not token.stopped):
-                            time.sleep(0.05)
+                    device = self.PlaybackDevice(
+                        output_format=self.REQUESTED_FORMAT,
+                        nchannels=self.REQUESTED_CHANNELS,
+                        sample_rate=self.REQUESTED_RATE
+                    )
+                    device.start(stream)
 
-                        try:
-                            device.stop()
-                        except Exception:
-                            pass
-                        try:
-                            device.close()
-                        except Exception:
-                            pass
-                        device = None
+                    t_end = time.time() + seg_duration + 0.25
+                    while (time.time() < t_end) and (not token.stopped):
+                        time.sleep(0.05)
 
-                        try:
-                            decoder.close()
-                        except Exception:
-                            pass
-                        decoder = None
-                    return
+                    try:
+                        device.stop()
+                    except Exception:
+                        pass
+                    try:
+                        device.close()
+                    except Exception:
+                        pass
+                    device = None
+
+                    try:
+                        decoder.close()
+                    except Exception:
+                        pass
+                    decoder = None
+                return
 
             # 非循环：可以余弦淡出
             try:
@@ -839,7 +955,6 @@ class NonBlockingAudioEngine:
                 nchannels=self.REQUESTED_CHANNELS,
                 sample_rate=self.REQUESTED_RATE
             )
-
             if start_frame > 0:
                 if not self._skip_frames(decoder, start_frame, token):
                     return
@@ -850,7 +965,7 @@ class NonBlockingAudioEngine:
             except StopIteration:
                 return
 
-            device = miniaudio.PlaybackDevice(
+            device = self.PlaybackDevice(
                 output_format=self.REQUESTED_FORMAT,
                 nchannels=self.REQUESTED_CHANNELS,
                 sample_rate=self.REQUESTED_RATE
@@ -862,9 +977,8 @@ class NonBlockingAudioEngine:
                 time.sleep(0.05)
 
         except Exception as e:
-            self._log(f"【!!】 音频播放失败: {e}")
-            import traceback
-            traceback.print_exc()
+            self._log("【!!】 音频播放失败:")
+            self._log(traceback.format_exc())
         finally:
             if device:
                 try:
@@ -875,7 +989,6 @@ class NonBlockingAudioEngine:
                     device.close()
                 except Exception:
                     pass
-
             if decoder:
                 try:
                     decoder.close()
@@ -937,36 +1050,31 @@ class NonBlockingAudioEngine:
     @classmethod
     def validate_environment(cls, verbose=False, timeout_sec=0.15):
         """
-        给“调用者/电脑”用的环境自检：
-          - 不依赖任何外部音频文件
-          - 验证 miniaudio 可用 + PlaybackDevice 可打开/可start/stop/close + 回调generator协议正常 + cleanup 正常
         返回：
           - "ok"
-          - "not ok: <reason>"
+          - "not ok: <summary>\\n<details...>"
         """
-        engine = None
+        # 先做 compat 检测
+        compat = _MiniaudioCompat()
+        if not compat.ok:
+            return "not ok: miniaudio API mismatch\n" + compat.reason(with_diag=True)
+
+        # 真机试跑：开一个 PlaybackDevice，用内存 PCM 的 generator 推送（不依赖任何外部文件）
         device = None
         token = None
         try:
-            # 1) 基本能力检查
-            if not hasattr(miniaudio, "PlaybackDevice"):
-                return "not ok: miniaudio.PlaybackDevice not found"
-
-            # 2) 初始化引擎（静默）
+            # 用一个“静默引擎实例”来拿参数（不会加载资源）
             engine = cls(asset_folder=".", max_workers=1, silent=(not verbose))
 
-            # 3) 生成一小段“内存PCM”（非常轻，且不需要任何文件）
+            # 内存 PCM：极短正弦波（也可以把 amp=0.0 变成静音）
             rate = engine.REQUESTED_RATE
             ch = engine.REQUESTED_CHANNELS
-            frame_bytes = engine._frame_bytes
-
-            dur = 0.12  # 秒
-            frames = max(1, int(dur * rate))
+            dur = 0.12
+            frames = max(32, int(dur * rate))
             freq = 440.0
-            amp = 0.08  # 很轻的音量（不想出声可以改成 0.0）
-            samples = array.array("h")
+            amp = 0.02
 
-            # 立体声同相
+            samples = array.array("h")
             for n in range(frames):
                 s = int(32767 * amp * math.sin(2.0 * math.pi * freq * (n / float(rate))))
                 samples.append(s)
@@ -976,25 +1084,22 @@ class NonBlockingAudioEngine:
                 samples.byteswap()
             pcm = samples.tobytes()
 
-            # 4) 做一次 loop crossfade 预处理（验证这段代码可跑）
+            # 做一次 crossfade 预处理，验证该分支也可用
             pcm2, xfade_frames = engine._prepare_pcm_loop_crossfade(pcm, LOOP_CROSSFADE_MS_DEFAULT)
 
-            # 5) 用我们自己的 _pcm_loop_stream + PlaybackDevice 真正跑一下（验证回调协议+设备）
             token = PlaybackToken()
             stream = engine._pcm_loop_stream(pcm2, token, xfade_frames=xfade_frames)
             stream.send(None)  # prime
 
-            device = miniaudio.PlaybackDevice(
+            device = compat.PlaybackDevice(
                 output_format=engine.REQUESTED_FORMAT,
                 nchannels=engine.REQUESTED_CHANNELS,
                 sample_rate=engine.REQUESTED_RATE
             )
             device.start(stream)
 
-            # 让它跑一小会
             time.sleep(float(timeout_sec))
 
-            # 6) 停止并收尾
             token.stop()
             time.sleep(0.03)
 
@@ -1006,18 +1111,16 @@ class NonBlockingAudioEngine:
                 device.close()
             except Exception:
                 pass
-            device = None
 
             engine.cleanup()
-            engine = None
-
             return "ok"
 
         except Exception as e:
-            return f"not ok: {type(e).__name__}: {e}"
+            detail = _miniaudio_diagnostics(verbose_trace=False)
+            tb = traceback.format_exc()
+            return "not ok: runtime playback test failed\n" + f"{_short_exc(e)}\n\n--- diagnostics ---\n{detail}\n\n--- traceback ---\n{tb}"
 
         finally:
-            # 尽力清理
             try:
                 if token is not None:
                     token.stop()
@@ -1033,11 +1136,6 @@ class NonBlockingAudioEngine:
                     device.close()
             except Exception:
                 pass
-            try:
-                if engine is not None:
-                    engine.cleanup()
-            except Exception:
-                pass
 
 
 # ---------------- 独立测试（可删） ----------------
@@ -1046,6 +1144,12 @@ if __name__ == "__main__":
     print("验证接口（不依赖任何外部音频文件）")
     print(NonBlockingAudioEngine.validate_environment(verbose=True))
     print("=" * 60)
+
+    # 只有在 ok 的情况下才继续测试播放，避免你现在这种 API mismatch 直接炸栈
+    status = NonBlockingAudioEngine.validate_environment(verbose=False)
+    if status != "ok":
+        print("环境不满足，跳过播放测试。")
+        sys.exit(0)
 
     TEST_FILE = r"E:\s\wol\py\kope\Foundry_PYRMDPLAZA.mp3"
     asset_folder = os.path.dirname(TEST_FILE) or "."
@@ -1058,7 +1162,6 @@ if __name__ == "__main__":
 
     engine = NonBlockingAudioEngine(asset_folder=asset_folder, max_workers=8)
 
-    # A：播放 5~9 秒（非循环），末尾2秒余弦淡出
     tokenA = engine.play_sound_file(
         TEST_FILE,
         play_range=(5.0, 9.0),
@@ -1069,13 +1172,12 @@ if __name__ == "__main__":
     time.sleep(6.0)
     tokenA.stop()
 
-    # B：无缝循环播放 5~9 秒（默认 trim + 12ms crossfade），跑 10 秒后停止
     tokenB = engine.play_sound_file(
         TEST_FILE,
         play_range=(5.0, 9.0),
         loop=True,
         trim_silence=True,
-        loop_crossfade_ms=12.0  # 你也可以设 0 关闭
+        loop_crossfade_ms=12.0
     )
     time.sleep(10.0)
     tokenB.stop()
